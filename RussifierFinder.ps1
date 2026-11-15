@@ -184,12 +184,13 @@ $main.Controls.Add($searchPanel, 0, 4)
 
 $resultsGrid = New-Object System.Windows.Forms.DataGridView
 $resultsGrid.Dock = 'Fill'; $resultsGrid.AllowUserToAddRows = $false; $resultsGrid.AllowUserToDeleteRows = $false
-$resultsGrid.AllowUserToResizeRows = $false; $resultsGrid.RowHeadersVisible = $false; $resultsGrid.ReadOnly = $true
+$resultsGrid.AllowUserToResizeRows = $false; $resultsGrid.RowHeadersVisible = $false; $resultsGrid.ReadOnly = $false
 $resultsGrid.SelectionMode = 'FullRowSelect'; $resultsGrid.MultiSelect = $false; $resultsGrid.AutoSizeColumnsMode = 'Fill'
-$resultsGrid.BackgroundColor = [Drawing.Color]::White
+$resultsGrid.BackgroundColor = [Drawing.Color]::White; $resultsGrid.EditMode = 'EditOnEnter'
 foreach ($definition in @(
-    @('Mod', 'Мод', 27), @('Status', 'Статус', 17), @('Russifier', 'Русификатор', 29),
-    @('Score', 'Оценка', 8), @('Versions', 'Версии', 9), @('Link', 'Ссылка', 10)
+    @('ResultCategory', 'Результат', 17), @('Mod', 'Мод', 24), @('Status', 'Статус', 16),
+    @('Russifier', 'Русификатор', 28), @('Score', 'Оценка', 7),
+    @('Versions', 'Версии', 8), @('Link', 'Ссылка', 9)
 )) {
     $column = if ($definition[0] -eq 'Link') {
         New-Object System.Windows.Forms.DataGridViewLinkColumn
@@ -199,8 +200,10 @@ foreach ($definition in @(
         New-Object System.Windows.Forms.DataGridViewTextBoxColumn
     }
     $column.Name = $definition[0]; $column.HeaderText = $definition[1]; $column.FillWeight = $definition[2]
+    $column.ReadOnly = $definition[0] -ne 'Russifier'
     if ($definition[0] -eq 'Link') { $column.TrackVisitedState = $false }
     if ($definition[0] -eq 'Russifier') { $column.DisplayStyle = 'DropDownButton'; $column.FlatStyle = 'Flat' }
+    if ($definition[0] -ne 'Russifier') { $column.SortMode = 'Automatic' }
     [void]$resultsGrid.Columns.Add($column)
 }
 $main.Controls.Add($resultsGrid, 0, 5)
@@ -312,6 +315,62 @@ function Get-CandidateDisplayText {
     return "$($Candidate.Title)  —  рейтинг $($Candidate.Score)  [$($Candidate.WorkshopId)]"
 }
 
+function Get-ResultCategory {
+    param($Result)
+    if (@($Result.Candidates).Count -gt 0) { return 'Найден перевод' }
+    $status = [string]$Result.Status
+    if ($status -match '^Не найдено') { return 'Перевод не найден' }
+    if ($status -match '^Ошибка') { return 'Ошибка поиска' }
+    if ($status -match '^Уже активен') { return 'Русификатор активен' }
+    if ($status -match '^Установлен, но не активен') { return 'Русификатор установлен' }
+    if ($status -eq 'Русский встроен') { return 'Встроенный русский' }
+    if ($status -eq 'Это русификатор') { return 'Языковой мод' }
+    if ($status -eq 'Файлы мода не найдены') { return 'Файлы не найдены' }
+    return 'Прочее'
+}
+
+function Get-ResultCategoryOrder {
+    param([string]$Category)
+    switch ($Category) {
+        'Найден перевод' { return 1 }
+        'Перевод не найден' { return 2 }
+        'Ошибка поиска' { return 3 }
+        'Русификатор активен' { return 4 }
+        'Русификатор установлен' { return 5 }
+        'Встроенный русский' { return 6 }
+        'Языковой мод' { return 7 }
+        'Файлы не найдены' { return 8 }
+        default { return 99 }
+    }
+}
+
+function Get-ResultCategoryColor {
+    param([string]$Category)
+    switch ($Category) {
+        'Найден перевод' { return [Drawing.Color]::FromArgb(214, 242, 218) }
+        'Перевод не найден' { return [Drawing.Color]::FromArgb(255, 243, 205) }
+        'Ошибка поиска' { return [Drawing.Color]::FromArgb(248, 215, 218) }
+        'Русификатор активен' { return [Drawing.Color]::FromArgb(220, 242, 220) }
+        'Русификатор установлен' { return [Drawing.Color]::FromArgb(220, 235, 250) }
+        'Встроенный русский' { return [Drawing.Color]::FromArgb(224, 245, 237) }
+        'Языковой мод' { return [Drawing.Color]::FromArgb(238, 238, 238) }
+        'Файлы не найдены' { return [Drawing.Color]::FromArgb(242, 222, 222) }
+        default { return [Drawing.Color]::White }
+    }
+}
+
+function Set-ResultRowStyle {
+    param($Row, [string]$Category)
+    $color = Get-ResultCategoryColor $Category
+    $Row.DefaultCellStyle.BackColor = $color
+    $Row.DefaultCellStyle.SelectionBackColor = [Drawing.Color]::FromArgb(
+        [Math]::Max(0, $color.R - 35),
+        [Math]::Max(0, $color.G - 35),
+        [Math]::Max(0, $color.B - 35)
+    )
+    $Row.DefaultCellStyle.SelectionForeColor = [Drawing.Color]::Black
+}
+
 function Set-ResultRowCandidate {
     param($Row, $Candidate)
     if (-not $Candidate) {
@@ -329,14 +388,17 @@ function Set-ResultRowCandidate {
 
 function Add-ResultRows {
     param($Result)
+    $category = Get-ResultCategory $Result
     if (@($Result.Candidates).Count -eq 0) {
         $link = if ($Result.SearchUrl) { 'Ручной поиск' } else { '' }
-        $index = $resultsGrid.Rows.Add($Result.Mod.Name, $Result.Status, $null, '', '', $link)
-        $resultsGrid.Rows[$index].Tag = $Result
-        $resultsGrid.Rows[$index].Cells['Link'].Tag = $Result.SearchUrl
+        $index = $resultsGrid.Rows.Add($category, $Result.Mod.Name, $Result.Status, $null, '', '', $link)
+        $row = $resultsGrid.Rows[$index]
+        $row.Tag = $Result
+        $row.Cells['Link'].Tag = $Result.SearchUrl
+        Set-ResultRowStyle -Row $row -Category $category
     } else {
         $candidates = @($Result.Candidates | Sort-Object -Property @{ Expression = 'Score'; Descending = $true }, @{ Expression = 'Updated'; Descending = $true })
-        $index = $resultsGrid.Rows.Add($Result.Mod.Name, $Result.Status, $null, '', '', '')
+        $index = $resultsGrid.Rows.Add($category, $Result.Mod.Name, $Result.Status, $null, '', '', '')
         $row = $resultsGrid.Rows[$index]
         $row.Tag = $Result
         $comboCell = [System.Windows.Forms.DataGridViewComboBoxCell]$row.Cells['Russifier']
@@ -345,6 +407,7 @@ function Add-ResultRows {
         }
         $comboCell.Value = Get-CandidateDisplayText $candidates[0]
         Set-ResultRowCandidate -Row $row -Candidate $candidates[0]
+        Set-ResultRowStyle -Row $row -Category $category
     }
 }
 
@@ -412,10 +475,14 @@ $timer.Add_Tick({
             $script:mods = @($script:jobItems.ToArray())
             Update-ModGrid
         } else {
-            $script:results = @($script:jobItems.ToArray())
+            $script:results = @($script:jobItems.ToArray() | Sort-Object `
+                @{ Expression = { Get-ResultCategoryOrder (Get-ResultCategory $_) } },
+                @{ Expression = { $_.Mod.Name } })
             foreach ($result in $script:results) { Add-ResultRows $result }
             $found = @($script:results | Where-Object { @($_.Candidates).Count -gt 0 }).Count
-            $statusLabel.Text = "Готово. Проверено: $($script:results.Count), с кандидатами: $found"
+            $notFound = @($script:results | Where-Object { (Get-ResultCategory $_) -eq 'Перевод не найден' }).Count
+            $errors = @($script:results | Where-Object { (Get-ResultCategory $_) -eq 'Ошибка поиска' }).Count
+            $statusLabel.Text = "Готово. Проверено: $($script:results.Count) | Найдено: $found | Не найдено: $notFound | Ошибки: $errors"
             $exportButton.Enabled = $script:results.Count -gt 0
             $openReportButton.Enabled = $false
         }
