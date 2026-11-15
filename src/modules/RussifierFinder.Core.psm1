@@ -2,9 +2,10 @@
 $ErrorActionPreference = 'Stop'
 
 $script:RimWorldAppId = '294100'
-$script:RussianPattern = '(?i)(russian|русск|русифик|перевод|(^|[\s._\-\[\(])(ru|rus)([\s._\-\]\)]|$))'
-$script:TranslationPattern = '(?i)(translation|language\s*pack|locali[sz]ation|русск|русифик|перевод)'
+$script:RussianPattern = '(?i)(russian|рус{1,2}к\w*|рус{1,2}ификатор\w*|рус{1,2}ифик\w*|перевод\w*|(^|[\s._\-\[\(])(ru|rus|рус)([\s._\-\]\)]|$))'
+$script:TranslationPattern = '(?i)(translation|language\s*pack|locali[sz]ation|рус{1,2}к\w*|рус{1,2}ификатор\w*|рус{1,2}ифик\w*|перевод\w*)'
 $script:LocalizationPattern = '(?i)(translation|language\s*pack|locali[sz]ation|русск|русифик|перевод|汉化|中文版|中文|简中|繁中|中译|翻译|翻譯|\[(cn|zh|ko|kr|jp|ja|de|fr|es|pl|pt|ua|ukr)\]|zh-(cn|tw)|korean|한국어|한글|japanese|日本語|deutsch|german|français|french|español|spanish|polski|polish|portugu|україн|украин)'
+$script:TranslationNotRequiredPattern = '(?i)(facial\s*animation|body\s*part\s*animation|bodypart\s*animation|\bretexture\b|texture\s+(upgrade|replacement)|compatibility\s*patch|compat\s*patch|gene\s+(compatibility\s*)?patch|show\s+(your\s+)?ears)'
 
 function Get-RFLocalizationLanguages {
     param(
@@ -167,11 +168,13 @@ function Get-RFModMetadata {
 
     $dependencies = @(Get-RFXmlList $meta.SelectSingleNode('modDependencies'))
     $loadAfter = @(Get-RFXmlList $meta.SelectSingleNode('loadAfter'))
+    $loadBefore = @(Get-RFXmlList $meta.SelectSingleNode('loadBefore'))
     $coveredPackageIds = @(Get-RFConditionalModIds -ModPath $ModPath)
     $identityText = "$packageId $name"
     $localizationLanguages = @(Get-RFLocalizationLanguages -LanguageNames @($languageDirs | Select-Object -ExpandProperty Name -Unique) -IdentityText $identityText)
     $looksLikeLocalization = ($languageDirs.Count -gt 0) -and (($identityText -match $script:LocalizationPattern) -or ($identityText -match $script:RussianPattern))
     $looksLikeTranslation = $looksLikeLocalization -and ($localizationLanguages -contains 'Русский')
+    $translationNotRequired = $name -match $script:TranslationNotRequiredPattern
 
     [pscustomobject]@{
         WorkshopId = [string]$WorkshopId
@@ -182,6 +185,7 @@ function Get-RFModMetadata {
         Description = $description
         Dependencies = $dependencies
         LoadAfter = $loadAfter
+        LoadBefore = $loadBefore
         CoveredPackageIds = $coveredPackageIds
         SupportedVersions = @(Get-RFXmlList $meta.SelectSingleNode('supportedVersions'))
         HasBuiltInRussian = ($russianDirs.Count -gt 0)
@@ -190,6 +194,7 @@ function Get-RFModMetadata {
         LocalizationLanguages = $localizationLanguages
         IsLocalization = $looksLikeLocalization
         IsTranslation = $looksLikeTranslation
+        TranslationNotRequired = $translationNotRequired
         InstalledTranslation = ''
         InstalledTranslationId = ''
         InstalledTranslationActive = $false
@@ -200,7 +205,10 @@ function Get-RFModMetadata {
 
 function Get-RFInstalledMods {
     [CmdletBinding()]
-    param([string[]]$WorkshopRoots = (Get-RFWorkshopRoots))
+    param(
+        [string[]]$WorkshopRoots = (Get-RFWorkshopRoots),
+        [scriptblock]$OnProgress
+    )
     $mods = New-Object System.Collections.Generic.List[object]
     $scanRoots = New-Object System.Collections.Generic.List[string]
     foreach ($root in @($WorkshopRoots)) {
@@ -211,12 +219,18 @@ function Get-RFInstalledMods {
             if ((Test-Path -LiteralPath $localMods) -and -not $scanRoots.Contains($localMods)) { $scanRoots.Add($localMods) }
         } catch {}
     }
+    $directories = @($scanRoots.ToArray() | ForEach-Object { if (Test-Path -LiteralPath $_) { Get-ChildItem -LiteralPath $_ -Directory -ErrorAction SilentlyContinue } })
+    $scanIndex = 0
     foreach ($root in $scanRoots.ToArray()) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
         foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) {
+            $scanIndex++
             $workshopId = if ($directory.Name -match '^\d{6,}$') { $directory.Name } else { '' }
             $mod = Get-RFModMetadata -ModPath $directory.FullName -WorkshopId $workshopId
             if ($null -ne $mod) { $mods.Add($mod) }
+            if ($OnProgress -and ($scanIndex -eq 1 -or $scanIndex -eq $directories.Count -or $scanIndex % 5 -eq 0)) {
+                & $OnProgress $scanIndex $directories.Count $directory.Name
+            }
         }
     }
     return $mods.ToArray()
@@ -226,7 +240,8 @@ function Get-RFActiveMods {
     [CmdletBinding()]
     param(
         [string]$ConfigPath = (Get-RFDefaultConfigPath),
-        [string[]]$WorkshopRoots = (Get-RFWorkshopRoots)
+        [string[]]$WorkshopRoots = (Get-RFWorkshopRoots),
+        [scriptblock]$OnProgress
     )
     if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Не найден ModsConfig.xml: $ConfigPath" }
     [xml]$config = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
@@ -234,7 +249,7 @@ function Get-RFActiveMods {
     $activeSet = @{}
     foreach ($id in $activeIds) { if ($id) { $activeSet[$id] = $true } }
 
-    $installed = @(Get-RFInstalledMods -WorkshopRoots $WorkshopRoots)
+    $installed = @(Get-RFInstalledMods -WorkshopRoots $WorkshopRoots -OnProgress $OnProgress)
     $byPackage = @{}
     foreach ($mod in $installed) {
         $key = $mod.PackageId.ToLowerInvariant()
@@ -251,9 +266,9 @@ function Get-RFActiveMods {
         } else {
             $active.Add([pscustomobject]@{
                 WorkshopId = ''; PackageId = $id; Name = $id; Path = ''; AboutPath = ''; Description = ''
-                Dependencies = @(); LoadAfter = @(); CoveredPackageIds = @(); SupportedVersions = @(); HasBuiltInRussian = $false
+                Dependencies = @(); LoadAfter = @(); LoadBefore = @(); CoveredPackageIds = @(); SupportedVersions = @(); HasBuiltInRussian = $false
                 RussianFiles = 0; Languages = @(); LocalizationLanguages = @()
-                IsLocalization = $false; IsTranslation = ($id -match $script:RussianPattern)
+                IsLocalization = $false; IsTranslation = ($id -match $script:RussianPattern); TranslationNotRequired = $false
                 InstalledTranslation = ''; InstalledTranslationId = ''; InstalledTranslationActive = $false
                 Source = 'missing'; SteamUrl = ''
             })
@@ -262,12 +277,14 @@ function Get-RFActiveMods {
 
     $activeByPackage = @{}
     foreach ($mod in $active) { $activeByPackage[$mod.PackageId.ToLowerInvariant()] = $mod }
+    $activeByWorkshop = @{}
+    foreach ($mod in $active) { if ($mod.WorkshopId) { $activeByWorkshop[[string]$mod.WorkshopId] = $mod.PackageId.ToLowerInvariant() } }
     # Check every installed language mod, not only enabled ones. This lets the
     # UI distinguish an active translation from one downloaded in Workshop but
     # not currently enabled in ModsConfig.xml.
     foreach ($translation in @($installed | Where-Object { $_.IsTranslation })) {
         $translationIsActive = $activeSet.ContainsKey($translation.PackageId.ToLowerInvariant())
-        $targetKeys = @(@($translation.Dependencies) + @($translation.LoadAfter) |
+        $targetKeys = @(@($translation.Dependencies) + @($translation.LoadAfter) + @($translation.LoadBefore) |
             ForEach-Object { ([string]$_).ToLowerInvariant() } |
             Where-Object { $_ -and $activeByPackage.ContainsKey($_) -and $_ -notmatch '^(ludeon\.|brrainz\.harmony$)' } |
             Select-Object -Unique)
@@ -280,8 +297,12 @@ function Get-RFActiveMods {
             $targetName = Get-RFNormalizedText $activeByPackage[$_].Name
             $targetName -and $translationText.Contains($targetName)
         })
-        $matchedKeys = @(@($conditionalCoverageKeys) + @($nameMatchedKeys) | Select-Object -Unique)
-        if ($matchedKeys.Count -eq 0 -and $targetKeys.Count -eq 1) { $matchedKeys = $targetKeys }
+        $descriptionCoverageKeys = @([regex]::Matches([string]$translation.Description, '(?i)(?:id=|filedetails/\?id=)(\d{6,})') |
+            ForEach-Object { $_.Groups[1].Value } |
+            Where-Object { $activeByWorkshop.ContainsKey($_) } |
+            ForEach-Object { $activeByWorkshop[$_] } |
+            Select-Object -Unique)
+        $matchedKeys = @(@($conditionalCoverageKeys) + @($nameMatchedKeys) + @($descriptionCoverageKeys) | Select-Object -Unique)
         if ($matchedKeys.Count -eq 0) {
             # Some language mods do not declare the original as a dependency or
             # in loadAfter. Infer the relation only from strong identifiers:
@@ -321,6 +342,7 @@ function Get-RFActiveMods {
                 })
             }
         }
+        if ($matchedKeys.Count -eq 0 -and $targetKeys.Count -eq 1) { $matchedKeys = $targetKeys }
         foreach ($key in $matchedKeys) {
             $target = $activeByPackage[$key]
             # Prefer an enabled translation if several installed candidates
@@ -381,12 +403,13 @@ function Get-RFModByWorkshopId {
     $detailIdentity = "$($details.title) $($details.description)"
     return [pscustomobject]@{
         WorkshopId = $id; PackageId = ''; Name = [string]$details.title; Path = ''; AboutPath = ''
-        Description = [string]$details.description; Dependencies = @(); LoadAfter = @(); CoveredPackageIds = @()
+        Description = [string]$details.description; Dependencies = @(); LoadAfter = @(); LoadBefore = @(); CoveredPackageIds = @()
         SupportedVersions = @($detailTags | Where-Object { $_ -match '^1\.\d+$' })
         HasBuiltInRussian = $false; RussianFiles = 0; Languages = @()
         LocalizationLanguages = @(Get-RFLocalizationLanguages -IdentityText $detailIdentity)
         IsLocalization = (($detailTags -match '(?i)^Translation$') -or ($detailIdentity -match $script:LocalizationPattern))
         IsTranslation = (($detailTags -match '(?i)^Translation$') -and ($detailIdentity -match $script:RussianPattern))
+        TranslationNotRequired = ([string]$details.title -match $script:TranslationNotRequiredPattern)
         InstalledTranslation = ''; InstalledTranslationId = ''; InstalledTranslationActive = $false; Source = 'steam';
         SteamUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=$id"
     }
@@ -481,8 +504,9 @@ function Get-RFCandidateScore {
     if ($Source.PackageId -and $Candidate.Description -match [regex]::Escape($Source.PackageId)) {
         $score += 100; $reasons.Add('packageId оригинала')
     }
+    $sourceNameTokens = @($sourceName -split ' ' | Where-Object { $_ })
     if ($sourceName -and $title -eq $sourceName) { $score += 150; $reasons.Add('точное название') }
-    elseif ($sourceName -and $title.Contains($sourceName)) { $score += 115; $reasons.Add('название в заголовке') }
+    elseif ($sourceName -and $sourceNameTokens.Count -ge 2 -and $title.Contains($sourceName)) { $score += 115; $reasons.Add('название в заголовке') }
     elseif ($sourceName -and $allText.Contains($sourceName)) { $score += 20; $reasons.Add('название в описании') }
 
     $stopWords = @('mod','rimworld','expanded','expansion','faction','race','framework','continued','forked','the','and','for','with')
@@ -536,7 +560,7 @@ function Find-RFRussifiers {
 
     $allMods = @($Mods)
     $searchable = @($allMods | Where-Object {
-        -not $_.IsLocalization -and $_.Name -and
+        -not $_.IsLocalization -and -not $_.TranslationNotRequired -and $_.Name -and
         $_.Source -ne 'missing' -and
         ($IncludeWithRussian -or (-not $_.HasBuiltInRussian -and -not $_.InstalledTranslation))
     })
@@ -555,6 +579,8 @@ function Find-RFRussifiers {
             $resultMap[$key] = [pscustomobject]@{ Mod = $mod; Status = "${translationStatus}: $($mod.InstalledTranslation)"; SearchUrl = ''; Candidates = @(); Error = '' }
         } elseif ($mod.HasBuiltInRussian -and -not $IncludeWithRussian) {
             $resultMap[$key] = [pscustomobject]@{ Mod = $mod; Status = 'Русский встроен'; SearchUrl = ''; Candidates = @(); Error = '' }
+        } elseif ($mod.TranslationNotRequired -and -not $IncludeWithRussian) {
+            $resultMap[$key] = [pscustomobject]@{ Mod = $mod; Status = 'Перевод не требуется'; SearchUrl = ''; Candidates = @(); Error = '' }
         }
     }
 
