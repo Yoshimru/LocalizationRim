@@ -431,7 +431,10 @@ function Start-LoadJob {
     if ($script:currentJob) { return }
     if (-not (Test-Path -LiteralPath $configRow.TextBox.Text)) { [Windows.Forms.MessageBox]::Show('Не найден ModsConfig.xml.', 'Ошибка', 'OK', 'Error'); return }
     if (-not (Test-Path -LiteralPath $workshopRow.TextBox.Text)) { [Windows.Forms.MessageBox]::Show('Не найдена папка Workshop.', 'Ошибка', 'OK', 'Error'); return }
-    $script:jobItems.Clear(); $script:jobMode = 'load'
+    $script:jobItems.Clear(); $script:jobMode = 'load'; $script:results = @()
+    $resultsGrid.Rows.Clear()
+    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false
+    $exportButton.Enabled = $false; $openReportButton.Enabled = $false
     $script:currentJob = Start-Job -ScriptBlock {
         param($module, $config, $root)
         Import-Module $module -Force

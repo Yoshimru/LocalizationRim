@@ -66,6 +66,23 @@ function Get-RFXmlList {
     } | Where-Object { $_ })
 }
 
+function Get-RFConditionalModIds {
+    param([Parameter(Mandatory)][string]$ModPath)
+    $ids = New-Object System.Collections.Generic.List[string]
+    foreach ($fileName in @('loadFolders.xml', 'LoadFolders.xml')) {
+        $loadFoldersPath = Join-Path $ModPath $fileName
+        if (-not (Test-Path -LiteralPath $loadFoldersPath)) { continue }
+        try {
+            [xml]$loadFolders = [IO.File]::ReadAllText($loadFoldersPath, [Text.UTF8Encoding]::new($false))
+            foreach ($node in @($loadFolders.SelectNodes('//*[@IfModActive]'))) {
+                $raw = [string]$node.Attributes['IfModActive'].Value
+                foreach ($id in @($raw -split '[,;\s]+' | Where-Object { $_ })) { $ids.Add($id) }
+            }
+        } catch {}
+    }
+    return @($ids | Select-Object -Unique)
+}
+
 function Get-RFModMetadata {
     [CmdletBinding()]
     param(
@@ -107,6 +124,7 @@ function Get-RFModMetadata {
 
     $dependencies = @(Get-RFXmlList $meta.SelectSingleNode('modDependencies'))
     $loadAfter = @(Get-RFXmlList $meta.SelectSingleNode('loadAfter'))
+    $coveredPackageIds = @(Get-RFConditionalModIds -ModPath $ModPath)
     $identityText = "$packageId $name"
     $looksLikeTranslation = (($identityText -match $script:TranslationPattern) -or ($identityText -match $script:RussianPattern)) -and ($russianDirs.Count -gt 0)
 
@@ -119,6 +137,7 @@ function Get-RFModMetadata {
         Description = $description
         Dependencies = $dependencies
         LoadAfter = $loadAfter
+        CoveredPackageIds = $coveredPackageIds
         SupportedVersions = @(Get-RFXmlList $meta.SelectSingleNode('supportedVersions'))
         HasBuiltInRussian = ($russianDirs.Count -gt 0)
         RussianFiles = $russianFileCount
@@ -172,7 +191,7 @@ function Get-RFActiveMods {
         } else {
             $active.Add([pscustomobject]@{
                 WorkshopId = ''; PackageId = $id; Name = $id; Path = ''; AboutPath = ''; Description = ''
-                Dependencies = @(); LoadAfter = @(); SupportedVersions = @(); HasBuiltInRussian = $false
+                Dependencies = @(); LoadAfter = @(); CoveredPackageIds = @(); SupportedVersions = @(); HasBuiltInRussian = $false
                 RussianFiles = 0; Languages = @(); IsTranslation = ($id -match $script:RussianPattern)
                 InstalledTranslation = ''; InstalledTranslationId = ''; InstalledTranslationActive = $false
                 Source = 'missing'; SteamUrl = ''
@@ -191,11 +210,16 @@ function Get-RFActiveMods {
             ForEach-Object { ([string]$_).ToLowerInvariant() } |
             Where-Object { $_ -and $activeByPackage.ContainsKey($_) -and $_ -notmatch '^(ludeon\.|brrainz\.harmony$)' } |
             Select-Object -Unique)
+        $conditionalCoverageKeys = @($translation.CoveredPackageIds |
+            ForEach-Object { ([string]$_).ToLowerInvariant() } |
+            Where-Object { $_ -and $activeByPackage.ContainsKey($_) -and $_ -notmatch '^ludeon\.' } |
+            Select-Object -Unique)
         $translationText = Get-RFNormalizedText "$($translation.Name) $($translation.Description) $($translation.PackageId)"
-        $matchedKeys = @($targetKeys | Where-Object {
+        $nameMatchedKeys = @($targetKeys | Where-Object {
             $targetName = Get-RFNormalizedText $activeByPackage[$_].Name
             $targetName -and $translationText.Contains($targetName)
         })
+        $matchedKeys = @(@($conditionalCoverageKeys) + @($nameMatchedKeys) | Select-Object -Unique)
         if ($matchedKeys.Count -eq 0 -and $targetKeys.Count -eq 1) { $matchedKeys = $targetKeys }
         if ($matchedKeys.Count -eq 0) {
             # Some language mods do not declare the original as a dependency or
@@ -296,7 +320,7 @@ function Get-RFModByWorkshopId {
     $detailIdentity = "$($details.title) $($details.description)"
     return [pscustomobject]@{
         WorkshopId = $id; PackageId = ''; Name = [string]$details.title; Path = ''; AboutPath = ''
-        Description = [string]$details.description; Dependencies = @(); LoadAfter = @()
+        Description = [string]$details.description; Dependencies = @(); LoadAfter = @(); CoveredPackageIds = @()
         SupportedVersions = @($detailTags | Where-Object { $_ -match '^1\.\d+$' })
         HasBuiltInRussian = $false; RussianFiles = 0; Languages = @()
         IsTranslation = (($detailTags -match '(?i)^Translation$') -and ($detailIdentity -match $script:RussianPattern))
