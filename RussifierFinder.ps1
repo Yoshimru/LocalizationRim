@@ -187,6 +187,10 @@ $resultsGrid.Dock = 'Fill'; $resultsGrid.AllowUserToAddRows = $false; $resultsGr
 $resultsGrid.AllowUserToResizeRows = $false; $resultsGrid.RowHeadersVisible = $false; $resultsGrid.ReadOnly = $false
 $resultsGrid.SelectionMode = 'FullRowSelect'; $resultsGrid.MultiSelect = $false; $resultsGrid.AutoSizeColumnsMode = 'Fill'
 $resultsGrid.BackgroundColor = [Drawing.Color]::White; $resultsGrid.EditMode = 'EditOnEnter'
+$installColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+$installColumn.Name = 'Install'; $installColumn.HeaderText = 'Уст.'; $installColumn.FillWeight = 6
+$installColumn.ReadOnly = $false; $installColumn.SortMode = 'NotSortable'
+[void]$resultsGrid.Columns.Add($installColumn)
 foreach ($definition in @(
     @('ResultCategory', 'Результат', 17), @('Mod', 'Мод', 24), @('Status', 'Статус', 16),
     @('Russifier', 'Русификатор', 28), @('Score', 'Оценка', 7),
@@ -209,20 +213,28 @@ foreach ($definition in @(
 $main.Controls.Add($resultsGrid, 0, 5)
 
 $bottom = New-Object System.Windows.Forms.TableLayoutPanel
-$bottom.Dock = 'Fill'; $bottom.AutoSize = $true; $bottom.ColumnCount = 4
+$bottom.Dock = 'Fill'; $bottom.AutoSize = $true; $bottom.ColumnCount = 6
 $bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 220)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 110)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 110)))
+$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 180)))
+$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 145)))
+$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 210)))
+$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
+$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = 'Загрузите сборку или добавьте отдельный мод.'; $statusLabel.AutoSize = $true; $statusLabel.Anchor = 'Left'
 $progress = New-Object System.Windows.Forms.ProgressBar
 $progress.Dock = 'Fill'; $progress.Style = 'Blocks'
+$selectFoundButton = New-Object System.Windows.Forms.Button
+$selectFoundButton.Text = 'Отметить найденные'; $selectFoundButton.Dock = 'Fill'; $selectFoundButton.Enabled = $false
+$installButton = New-Object System.Windows.Forms.Button
+$installButton.Text = 'Установить выбранные'; $installButton.Dock = 'Fill'; $installButton.Enabled = $false
 $exportButton = New-Object System.Windows.Forms.Button
 $exportButton.Text = 'Экспорт...'; $exportButton.Dock = 'Fill'; $exportButton.Enabled = $false
 $openReportButton = New-Object System.Windows.Forms.Button
 $openReportButton.Text = 'Открыть отчёт'; $openReportButton.Dock = 'Fill'; $openReportButton.Enabled = $false
-$bottom.Controls.Add($statusLabel, 0, 0); $bottom.Controls.Add($progress, 1, 0); $bottom.Controls.Add($exportButton, 2, 0); $bottom.Controls.Add($openReportButton, 3, 0)
+$bottom.Controls.Add($statusLabel, 0, 0); $bottom.Controls.Add($progress, 1, 0)
+$bottom.Controls.Add($selectFoundButton, 2, 0); $bottom.Controls.Add($installButton, 3, 0)
+$bottom.Controls.Add($exportButton, 4, 0); $bottom.Controls.Add($openReportButton, 5, 0)
 $main.Controls.Add($bottom, 0, 6)
 
 function Get-ModStateText {
@@ -306,6 +318,8 @@ function Set-BusyState {
     param([bool]$Busy, [string]$Text)
     foreach ($control in @($loadButton, $addButton, $searchCheckedButton, $searchAllButton, $selectAllButton, $clearButton)) { $control.Enabled = -not $Busy }
     $cancelButton.Enabled = $Busy
+    $installButton.Enabled = -not $Busy -and @($resultsGrid.Rows | Where-Object { -not $_.Cells['Install'].ReadOnly }).Count -gt 0
+    $selectFoundButton.Enabled = $installButton.Enabled
     if ($Busy) { $progress.Style = 'Marquee'; $progress.MarqueeAnimationSpeed = 25 } else { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 }
     if ($Text) { $statusLabel.Text = $Text }
 }
@@ -391,16 +405,18 @@ function Add-ResultRows {
     $category = Get-ResultCategory $Result
     if (@($Result.Candidates).Count -eq 0) {
         $link = if ($Result.SearchUrl) { 'Ручной поиск' } else { '' }
-        $index = $resultsGrid.Rows.Add($category, $Result.Mod.Name, $Result.Status, $null, '', '', $link)
+        $index = $resultsGrid.Rows.Add($false, $category, $Result.Mod.Name, $Result.Status, $null, '', '', $link)
         $row = $resultsGrid.Rows[$index]
         $row.Tag = $Result
+        $row.Cells['Install'].ReadOnly = $true
         $row.Cells['Link'].Tag = $Result.SearchUrl
         Set-ResultRowStyle -Row $row -Category $category
     } else {
         $candidates = @($Result.Candidates | Sort-Object -Property @{ Expression = 'Score'; Descending = $true }, @{ Expression = 'Updated'; Descending = $true })
-        $index = $resultsGrid.Rows.Add($category, $Result.Mod.Name, $Result.Status, $null, '', '', '')
+        $index = $resultsGrid.Rows.Add($false, $category, $Result.Mod.Name, $Result.Status, $null, '', '', '')
         $row = $resultsGrid.Rows[$index]
         $row.Tag = $Result
+        $row.Cells['Install'].ReadOnly = $false
         $comboCell = [System.Windows.Forms.DataGridViewComboBoxCell]$row.Cells['Russifier']
         foreach ($candidate in $candidates) {
             [void]$comboCell.Items.Add((Get-CandidateDisplayText $candidate))
@@ -430,6 +446,7 @@ function Start-SearchJob {
     if ($Mods.Count -eq 0) { [Windows.Forms.MessageBox]::Show('Не выбраны моды для поиска.', 'Поиск', 'OK', 'Information'); return }
     $json = $Mods | ConvertTo-Json -Depth 8 -Compress
     $script:jobItems.Clear(); $script:jobMode = 'search'; $script:results = @(); $resultsGrid.Rows.Clear()
+    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false
     $include = $includeBox.Checked
     $script:currentJob = Start-Job -ScriptBlock {
         param($module, $modsJson, $parallel, $max, $includeExisting)
@@ -449,11 +466,96 @@ function Start-SearchJob {
     $progress.Style = 'Blocks'
 }
 
+function Get-SelectedTranslationCandidates {
+    $selected = New-Object System.Collections.Generic.List[object]
+    foreach ($row in $resultsGrid.Rows) {
+        if ($row.Cells['Install'].ReadOnly -or $row.Cells['Install'].Value -ne $true) { continue }
+        $result = $row.Tag
+        if (-not $result -or @($result.Candidates).Count -eq 0) { continue }
+        $selectedText = [string]$row.Cells['Russifier'].Value
+        $candidate = @($result.Candidates | Where-Object { (Get-CandidateDisplayText $_) -eq $selectedText } | Select-Object -First 1)
+        if ($candidate.Count -gt 0) { $selected.Add($candidate[0]) }
+    }
+    return @($selected | Sort-Object WorkshopId -Unique)
+}
+
+function Start-InstallJob {
+    $candidates = @(Get-SelectedTranslationCandidates)
+    if ($candidates.Count -eq 0) {
+        [Windows.Forms.MessageBox]::Show('Отметьте найденные русификаторы в колонке «Уст.».', 'Установка', 'OK', 'Information')
+        return
+    }
+    $message = "Будет оформлена подписка на $($candidates.Count) русификаторов.`r`n`r`nПосле загрузки они будут добавлены в ModsConfig.xml. Перед изменением создаётся резервная копия. RimWorld должен быть закрыт; открытый RimSort будет закрыт автоматически.`r`n`r`nПродолжить?"
+    if ([Windows.Forms.MessageBox]::Show($message, 'Подписка и добавление', 'YesNo', 'Question') -ne 'Yes') { return }
+    $operationId = [guid]::NewGuid().ToString('N')
+    $requestPath = Join-Path $env:TEMP "rf-install-$operationId-request.json"
+    $resultPath = Join-Path $env:TEMP "rf-install-$operationId-result.json"
+    $progressPath = Join-Path $env:TEMP "rf-install-$operationId-progress.json"
+    $stdoutPath = Join-Path $env:TEMP "rf-install-$operationId-stdout.log"
+    $stderrPath = Join-Path $env:TEMP "rf-install-$operationId-stderr.log"
+    $helperPath = Join-Path $PSScriptRoot 'InstallTranslations.Helper.ps1'
+    $request = [pscustomobject]@{
+        ModulePath = $modulePath
+        WorkshopIds = @($candidates.WorkshopId)
+        ConfigPath = $configRow.TextBox.Text
+        WorkshopRoots = @($workshopRow.TextBox.Text)
+        KeepRimSortOpen = $false
+    }
+    [IO.File]::WriteAllText($requestPath, ($request | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
+    $script:jobItems.Clear(); $script:jobMode = 'install'
+    $script:currentJob = Start-Job -ScriptBlock {
+        param($helper, $requestFile, $resultFile, $progressFile, $stdoutFile, $stderrFile)
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -RequestPath "{1}" -ResultPath "{2}" -ProgressPath "{3}"' -f `
+            $helper, $requestFile, $resultFile, $progressFile
+        $process = $null
+        $lastProgress = ''
+        try {
+            $process = Start-Process powershell.exe -ArgumentList $arguments -RedirectStandardOutput $stdoutFile `
+                -RedirectStandardError $stderrFile -WindowStyle Hidden -PassThru
+            while (-not $process.HasExited) {
+                if (Test-Path -LiteralPath $progressFile) {
+                    try {
+                        $progressJson = [IO.File]::ReadAllText($progressFile, [Text.UTF8Encoding]::new($false))
+                        if ($progressJson -and $progressJson -ne $lastProgress) {
+                            $lastProgress = $progressJson
+                            Write-Output ($progressJson | ConvertFrom-Json)
+                        }
+                    } catch {}
+                }
+                Start-Sleep -Milliseconds 300
+                $process.Refresh()
+            }
+            if (Test-Path -LiteralPath $progressFile) {
+                try {
+                    $progressJson = [IO.File]::ReadAllText($progressFile, [Text.UTF8Encoding]::new($false))
+                    if ($progressJson -and $progressJson -ne $lastProgress) { Write-Output ($progressJson | ConvertFrom-Json) }
+                } catch {}
+            }
+            if (-not (Test-Path -LiteralPath $resultFile)) {
+                $nativeError = if (Test-Path -LiteralPath $stderrFile) { [IO.File]::ReadAllText($stderrFile) } else { '' }
+                throw "Вспомогательный процесс не создал отчёт. $nativeError"
+            }
+            $result = ([IO.File]::ReadAllText($resultFile, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json)
+            if (-not $result.Success) { throw [string]$result.Error }
+            Write-Output $result.Report
+        } finally {
+            Remove-Item $requestFile, $resultFile, $progressFile, $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        }
+    } -ArgumentList $helperPath, $requestPath, $resultPath, $progressPath, $stdoutPath, $stderrPath
+    Set-BusyState $true "Установка $($candidates.Count) русификаторов..."
+    $cancelButton.Enabled = $false
+    $progress.Style = 'Blocks'; $progress.Minimum = 0; $progress.Maximum = [Math]::Max(1, $candidates.Count); $progress.Value = 0
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 300
 $timer.Add_Tick({
+  try {
     if (-not $script:currentJob) { return }
-    foreach ($item in @(Receive-Job -Job $script:currentJob)) {
+    # Steamworks writes harmless diagnostics such as "Setting breakpad
+    # minidump AppID" to stderr. Do not let Receive-Job promote those lines to
+    # terminating UI exceptions when the global ErrorActionPreference is Stop.
+    foreach ($item in @(Receive-Job -Job $script:currentJob -ErrorAction SilentlyContinue)) {
         if ($item.PSObject.Properties['Kind'] -and $item.Kind -eq 'Progress') {
             $progress.Maximum = [Math]::Max(1, [int]$item.Total)
             $progress.Value = [Math]::Min($progress.Maximum, [int]$item.Done)
@@ -463,7 +565,7 @@ $timer.Add_Tick({
     if ($script:currentJob.State -in @('Completed', 'Failed', 'Stopped')) {
         $state = $script:currentJob.State
         $reason = if ($script:currentJob.ChildJobs.Count -gt 0) { [string]$script:currentJob.ChildJobs[0].JobStateInfo.Reason } else { '' }
-        Remove-Job -Job $script:currentJob -Force
+        Remove-Job -Job $script:currentJob -Force -ErrorAction SilentlyContinue
         $script:currentJob = $null
         Set-BusyState $false ''
         if ($state -eq 'Failed') {
@@ -474,7 +576,7 @@ $timer.Add_Tick({
         } elseif ($script:jobMode -eq 'load') {
             $script:mods = @($script:jobItems.ToArray())
             Update-ModGrid
-        } else {
+        } elseif ($script:jobMode -eq 'search') {
             $script:results = @($script:jobItems.ToArray() | Sort-Object `
                 @{ Expression = { Get-ResultCategoryOrder (Get-ResultCategory $_) } },
                 @{ Expression = { $_.Mod.Name } })
@@ -485,8 +587,34 @@ $timer.Add_Tick({
             $statusLabel.Text = "Готово. Проверено: $($script:results.Count) | Найдено: $found | Не найдено: $notFound | Ошибки: $errors"
             $exportButton.Enabled = $script:results.Count -gt 0
             $openReportButton.Enabled = $false
+            $installButton.Enabled = $found -gt 0
+            $selectFoundButton.Enabled = $found -gt 0
+        } elseif ($script:jobMode -eq 'install') {
+            $report = @($script:jobItems | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'InstallResult' } | Select-Object -Last 1)
+            if ($report.Count -eq 0) {
+                [Windows.Forms.MessageBox]::Show('Steam не вернул отчёт об установке.', 'Установка', 'OK', 'Error')
+            } else {
+                $item = $report[0]
+                $summary = "Подписка завершена.`r`n`r`nДобавлено в список модов: $(@($item.Added).Count)`r`nУже были активны: $(@($item.AlreadyActive).Count)`r`nНе удалось установить: $(@($item.Failed).Count)"
+                if ($item.BackupPath) { $summary += "`r`n`r`nРезервная копия:`r`n$($item.BackupPath)" }
+                $icon = if (@($item.Failed).Count -gt 0) { 'Warning' } else { 'Information' }
+                [Windows.Forms.MessageBox]::Show($summary, 'Установка русификаторов', 'OK', $icon)
+                foreach ($row in $resultsGrid.Rows) { $row.Cells['Install'].Value = $false }
+                Start-LoadJob
+            }
         }
     }
+  } catch {
+    $message = $_.Exception.Message
+    if ($script:currentJob) {
+        Stop-Job -Job $script:currentJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $script:currentJob -Force -ErrorAction SilentlyContinue
+        $script:currentJob = $null
+    }
+    Set-BusyState $false ''
+    $statusLabel.Text = "Ошибка интерфейса: $message"
+    [Windows.Forms.MessageBox]::Show("Операция остановлена, но приложение продолжит работу.`r`n`r`n$message", 'Ошибка', 'OK', 'Error') | Out-Null
+  }
 })
 $timer.Start()
 
@@ -504,6 +632,8 @@ $filterBox.Add_TextChanged({ Update-ModGrid })
 $categoryBox.Add_SelectedIndexChanged({ Update-ModGrid })
 $selectAllButton.Add_Click({ foreach ($row in $modsGrid.Rows) { $row.Cells['Check'].Value = Test-ModNeedsSearch $row.Tag } })
 $clearButton.Add_Click({ foreach ($row in $modsGrid.Rows) { $row.Cells['Check'].Value = $false } })
+$selectFoundButton.Add_Click({ foreach ($row in $resultsGrid.Rows) { if (-not $row.Cells['Install'].ReadOnly) { $row.Cells['Install'].Value = $true } } })
+$installButton.Add_Click({ Start-InstallJob })
 $searchCheckedButton.Add_Click({
     $selected = @($modsGrid.Rows | Where-Object { $_.Cells['Check'].Value -eq $true } | ForEach-Object { $_.Tag })
     Start-SearchJob -Mods $selected
@@ -553,6 +683,17 @@ $exportButton.Add_Click({
     }
 })
 $openReportButton.Add_Click({ if ($script:lastReport -and (Test-Path -LiteralPath $script:lastReport)) { Start-Process $script:lastReport } })
-$form.Add_FormClosing({ if ($script:currentJob) { Stop-Job -Job $script:currentJob; Remove-Job -Job $script:currentJob -Force } })
+$form.Add_FormClosing({
+    param($sender, $eventArgs)
+    if ($script:currentJob -and $script:jobMode -eq 'install') {
+        [Windows.Forms.MessageBox]::Show('Дождитесь завершения подписки и обновления ModsConfig.xml.', 'Установка выполняется', 'OK', 'Warning') | Out-Null
+        $eventArgs.Cancel = $true
+        return
+    }
+    if ($script:currentJob) {
+        Stop-Job -Job $script:currentJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $script:currentJob -Force -ErrorAction SilentlyContinue
+    }
+})
 
 [void]$form.ShowDialog()

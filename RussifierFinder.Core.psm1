@@ -549,6 +549,177 @@ function Find-RFRussifiers {
     return $ordered.ToArray()
 }
 
+function Get-RFRimSortSteamworksPath {
+    $candidates = @(
+        (Join-Path $env:USERPROFILE 'Desktop\RimSort'),
+        (Join-Path $env:USERPROFILE 'AppData\Local\RimSort'),
+        $PSScriptRoot
+    )
+    foreach ($directory in $candidates) {
+        if ((Test-Path -LiteralPath (Join-Path $directory 'SteamworksPy64.dll')) -and
+            (Test-Path -LiteralPath (Join-Path $directory 'steam_api64.dll')) -and
+            (Test-Path -LiteralPath (Join-Path $directory 'steam_appid.txt'))) {
+            return $directory
+        }
+    }
+    throw 'Не найдены SteamworksPy64.dll и steam_api64.dll. Установите или распакуйте RimSort на рабочий стол.'
+}
+
+function Initialize-RFSteamNative {
+    param([Parameter(Mandatory)][string]$SteamworksPath)
+    if (-not ('RFSteamNative' -as [type])) {
+        $dllPath = (Join-Path $SteamworksPath 'SteamworksPy64.dll').Replace('"', '""')
+        $source = @"
+using System;
+using System.Runtime.InteropServices;
+public static class RFSteamNative {
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern int SteamInit();
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern void SteamShutdown();
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern void RunCallbacks();
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern uint Workshop_GetNumSubscribedItems();
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern uint Workshop_GetItemState(ulong publishedFileId);
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern void Workshop_SubscribeItem(ulong publishedFileId);
+}
+"@
+        Add-Type -TypeDefinition $source -Language CSharp
+    }
+    $status = [RFSteamNative]::SteamInit()
+    switch ($status) {
+        0 { return }
+        2 { throw 'Steam не запущен.' }
+        3 { throw 'Steam не подключён или пользователь не вошёл в аккаунт.' }
+        default { throw "Не удалось инициализировать Steamworks (код $status)." }
+    }
+}
+
+function Install-RFTranslations {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$WorkshopIds,
+        [string]$ConfigPath = (Get-RFDefaultConfigPath),
+        [string[]]$WorkshopRoots = (Get-RFWorkshopRoots),
+        [ValidateRange(10, 900)][int]$DownloadTimeoutSeconds = 240,
+        [switch]$KeepRimSortOpen,
+        [scriptblock]$OnProgress
+    )
+    $ids = @($WorkshopIds | ForEach-Object { ([regex]::Match([string]$_, '\d{6,}')).Value } | Where-Object { $_ } | Select-Object -Unique)
+    if ($ids.Count -eq 0) { throw 'Не выбраны корректные Workshop ID.' }
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Не найден ModsConfig.xml: $ConfigPath" }
+    if (@($WorkshopRoots | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) { throw 'Не найдена папка Workshop RimWorld.' }
+
+    $rimWorld = @(Get-Process -Name 'RimWorldWin64', 'RimWorld' -ErrorAction SilentlyContinue)
+    if ($rimWorld.Count -gt 0) { throw 'Закройте RimWorld перед изменением ModsConfig.xml.' }
+    if (-not $KeepRimSortOpen) {
+        $rimSort = @(Get-Process -Name 'RimSort' -ErrorAction SilentlyContinue)
+        foreach ($process in $rimSort) {
+            $null = $process.CloseMainWindow()
+            if (-not $process.WaitForExit(10000)) { throw 'Закройте RimSort и повторите установку.' }
+        }
+    }
+
+    $steamworksPath = Get-RFRimSortSteamworksPath
+    $oldCurrentDirectory = [Environment]::CurrentDirectory
+    $initialized = $false
+    $alreadySubscribed = New-Object System.Collections.Generic.List[string]
+    $newlySubscribed = New-Object System.Collections.Generic.List[string]
+    $subscriptionFailed = New-Object System.Collections.Generic.List[string]
+    try {
+        [Environment]::CurrentDirectory = $steamworksPath
+        Initialize-RFSteamNative -SteamworksPath $steamworksPath
+        $initialized = $true
+        $index = 0
+        foreach ($id in $ids) {
+            $index++
+            $state = [RFSteamNative]::Workshop_GetItemState([uint64]$id)
+            if (($state -band 1) -ne 0) {
+                $alreadySubscribed.Add($id)
+            } else {
+                [RFSteamNative]::Workshop_SubscribeItem([uint64]$id)
+            }
+            [RFSteamNative]::RunCallbacks()
+            if ($OnProgress) { & $OnProgress 'subscribe' $index $ids.Count "Подписка: $id" }
+        }
+
+        $subscribeDeadline = [DateTime]::UtcNow.AddSeconds(45)
+        $pendingSubscription = @($ids | Where-Object { $alreadySubscribed -notcontains $_ })
+        while ($pendingSubscription.Count -gt 0 -and [DateTime]::UtcNow -lt $subscribeDeadline) {
+            [RFSteamNative]::RunCallbacks()
+            foreach ($id in @($pendingSubscription)) {
+                $state = [RFSteamNative]::Workshop_GetItemState([uint64]$id)
+                if (($state -band 1) -ne 0) { $newlySubscribed.Add($id) }
+            }
+            $pendingSubscription = @($pendingSubscription | Where-Object { $newlySubscribed -notcontains $_ })
+            if ($pendingSubscription.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+        }
+        foreach ($id in $pendingSubscription) { $subscriptionFailed.Add($id) }
+    } finally {
+        if ($initialized) { [RFSteamNative]::SteamShutdown() }
+        [Environment]::CurrentDirectory = $oldCurrentDirectory
+    }
+
+    $subscribed = @($alreadySubscribed.ToArray()) + @($newlySubscribed.ToArray())
+    $downloaded = New-Object System.Collections.Generic.List[object]
+    $pendingDownloads = @($subscribed)
+    $downloadDeadline = [DateTime]::UtcNow.AddSeconds($DownloadTimeoutSeconds)
+    while ($pendingDownloads.Count -gt 0 -and [DateTime]::UtcNow -lt $downloadDeadline) {
+        foreach ($id in @($pendingDownloads)) {
+            $modPath = $null
+            foreach ($root in $WorkshopRoots) {
+                $candidatePath = Join-Path $root $id
+                if (Test-Path -LiteralPath $candidatePath) { $modPath = $candidatePath; break }
+            }
+            if (-not $modPath) { continue }
+            $metadata = Get-RFModMetadata -ModPath $modPath -WorkshopId $id
+            if ($metadata -and $metadata.HasBuiltInRussian) { $downloaded.Add($metadata) }
+        }
+        $downloadedIds = @($downloaded | Select-Object -ExpandProperty WorkshopId -Unique)
+        $pendingDownloads = @($pendingDownloads | Where-Object { $downloadedIds -notcontains $_ })
+        if ($OnProgress) { & $OnProgress 'download' $downloadedIds.Count $subscribed.Count "Загружено: $($downloadedIds.Count)/$($subscribed.Count)" }
+        if ($pendingDownloads.Count -gt 0) { Start-Sleep -Seconds 1 }
+    }
+
+    [xml]$config = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+    $activeBefore = @($config.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+    $toAdd = @($downloaded | Where-Object { $activeBefore -notcontains $_.PackageId.ToLowerInvariant() })
+    $alreadyActive = @($downloaded | Where-Object { $activeBefore -contains $_.PackageId.ToLowerInvariant() })
+    $backupPath = ''
+    if ($toAdd.Count -gt 0) {
+        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $backupPath = Join-Path (Split-Path -Parent $ConfigPath) "ModsConfig.before-russifier-finder.$timestamp.xml"
+        Copy-Item -LiteralPath $ConfigPath -Destination $backupPath -ErrorAction Stop
+        try {
+            $raw = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+            $lines = @($toAdd | ForEach-Object { '    <li>' + [Security.SecurityElement]::Escape($_.PackageId.ToLowerInvariant()) + '</li>' })
+            $block = ($lines -join "`r`n") + "`r`n"
+            $updated = [regex]::Replace($raw, '(?m)^(\s*</activeMods>)', { param($match) $block + $match.Groups[1].Value }, 1)
+            if ($updated -eq $raw) { throw 'Не найден закрывающий тег activeMods.' }
+            [IO.File]::WriteAllText($ConfigPath, $updated, [Text.UTF8Encoding]::new($false))
+            [xml]$verify = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+            $activeAfter = @($verify.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+            $missingPackages = @($toAdd | Where-Object { $activeAfter -notcontains $_.PackageId.ToLowerInvariant() })
+            if ($missingPackages.Count -gt 0) { throw "Проверка конфига не пройдена: $($missingPackages.PackageId -join ', ')" }
+        } catch {
+            Copy-Item -LiteralPath $backupPath -Destination $ConfigPath -Force
+            throw "Не удалось обновить ModsConfig.xml; резервная копия восстановлена. $($_.Exception.Message)"
+        }
+    }
+
+    $failed = New-Object System.Collections.Generic.List[object]
+    foreach ($id in $subscriptionFailed) { $failed.Add([pscustomobject]@{ WorkshopId = $id; Reason = 'Steam не подтвердил подписку' }) }
+    foreach ($id in $pendingDownloads) { $failed.Add([pscustomobject]@{ WorkshopId = $id; Reason = 'Файлы не загрузились за отведённое время' }) }
+    [pscustomobject]@{
+        Kind = 'InstallResult'
+        Requested = $ids
+        AlreadySubscribed = $alreadySubscribed.ToArray()
+        NewlySubscribed = $newlySubscribed.ToArray()
+        Downloaded = @($downloaded | Select-Object WorkshopId, PackageId, Name -Unique)
+        Added = @($toAdd | Select-Object WorkshopId, PackageId, Name)
+        AlreadyActive = @($alreadyActive | Select-Object WorkshopId, PackageId, Name)
+        Failed = $failed.ToArray()
+        BackupPath = $backupPath
+    }
+}
+
 function Export-RFReport {
     [CmdletBinding()]
     param(
@@ -602,5 +773,5 @@ function Export-RFReport {
 Export-ModuleMember -Function @(
     'Get-RFDefaultConfigPath', 'Get-RFWorkshopRoots', 'Get-RFModMetadata', 'Get-RFInstalledMods',
     'Get-RFActiveMods', 'Get-RFModByWorkshopId', 'ConvertFrom-RFWorkshopSearchHtml',
-    'Get-RFCandidateScore', 'Find-RFRussifiers', 'Export-RFReport'
+    'Get-RFCandidateScore', 'Find-RFRussifiers', 'Install-RFTranslations', 'Export-RFReport'
 )
