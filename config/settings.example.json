@@ -1,0 +1,9 @@
+{
+  "Provider": "Google",
+  "BaseUrl": "https://agentrouter.org/v1",
+  "Model": "gpt-5.6-sol",
+  "ApiKeyProtected": "",
+  "MaxConcurrency": 5,
+  "RequestTimeoutSeconds": 60,
+  "CustomPrompt": "Translate RimWorld mod text into natural Russian. Preserve XML tags, placeholders, formatting tokens, proper names and line breaks. Return only the translation."
+}

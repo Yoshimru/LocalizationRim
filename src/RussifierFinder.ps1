@@ -11,8 +11,13 @@
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$modulePath = Join-Path $PSScriptRoot 'RussifierFinder.Core.psm1'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$modulePath = Join-Path $PSScriptRoot 'modules\RussifierFinder.Core.psm1'
+$machineModulePath = Join-Path $PSScriptRoot 'modules\MachineTranslation.psm1'
+$settingsDialogModulePath = Join-Path $PSScriptRoot 'modules\SettingsDialog.psm1'
 Import-Module $modulePath -Force
+Import-Module $machineModulePath -Force
+Import-Module $settingsDialogModulePath -Force
 
 function Invoke-RFCommandLine {
     $roots = if ($WorkshopRoot) { @($WorkshopRoot) } else { @(Get-RFWorkshopRoots) }
@@ -46,7 +51,7 @@ function Invoke-RFCommandLine {
         }
     }
     $rows | Format-Table -AutoSize
-    if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'russifier_report.html' }
+    if (-not $OutputPath) { $OutputPath = Join-Path $projectRoot 'runtime\russifier_report.html' }
     Export-RFReport -Results $results -Path $OutputPath
     Write-Host "Отчёт: $OutputPath"
 }
@@ -147,7 +152,10 @@ $categoryBox.Width = 225; $categoryBox.DropDownStyle = 'DropDownList'
     'Русификаторы', 'Локализаторы других языков', 'Файлы не найдены'
 ))
 $categoryBox.SelectedIndex = 0
-$actions.Controls.AddRange(@($loadButton, $idLabel, $idBox, $addButton, $filterLabel, $filterBox, $categoryLabel, $categoryBox))
+$settingsButton = New-Object System.Windows.Forms.Button
+$settingsButton.Text = 'Настройки'; $settingsButton.AutoSize = $true
+$actions.WrapContents = $true
+$actions.Controls.AddRange(@($loadButton, $idLabel, $idBox, $addButton, $filterLabel, $filterBox, $categoryLabel, $categoryBox, $settingsButton))
 [void]$main.Controls.Add($actions, 0, 2)
 
 $modsGrid = New-Object System.Windows.Forms.DataGridView
@@ -193,11 +201,13 @@ $searchAllButton = New-Object System.Windows.Forms.Button
 $searchAllButton.Text = 'Проверить всю сборку'; $searchAllButton.AutoSize = $true
 $activateInstalledButton = New-Object System.Windows.Forms.Button
 $activateInstalledButton.Text = 'Активировать переводы'; $activateInstalledButton.AutoSize = $true
+$machineTranslationButton = New-Object System.Windows.Forms.Button
+$machineTranslationButton.Text = 'Машинный перевод'; $machineTranslationButton.AutoSize = $true; $machineTranslationButton.Enabled = $false
 $includeBox = New-Object System.Windows.Forms.CheckBox
 $includeBox.Text = 'искать даже при наличии русского'; $includeBox.AutoSize = $true; $includeBox.Padding = New-Object System.Windows.Forms.Padding(8, 6, 0, 0)
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = 'Остановить'; $cancelButton.AutoSize = $true; $cancelButton.Enabled = $false
-$searchPanel.Controls.AddRange(@($selectAllButton, $selectInactiveButton, $clearButton, $searchCheckedButton, $searchAllButton, $activateInstalledButton, $includeBox, $cancelButton))
+$searchPanel.Controls.AddRange(@($selectAllButton, $selectInactiveButton, $clearButton, $searchCheckedButton, $searchAllButton, $activateInstalledButton, $machineTranslationButton, $includeBox, $cancelButton))
 [void]$main.Controls.Add($searchPanel, 0, 4)
 
 $resultsGrid = New-Object System.Windows.Forms.DataGridView
@@ -206,7 +216,7 @@ $resultsGrid.AllowUserToResizeRows = $false; $resultsGrid.RowHeadersVisible = $f
 $resultsGrid.SelectionMode = 'FullRowSelect'; $resultsGrid.MultiSelect = $false; $resultsGrid.AutoSizeColumnsMode = 'Fill'
 $resultsGrid.BackgroundColor = [Drawing.Color]::White; $resultsGrid.EditMode = 'EditOnEnter'
 $installColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
-$installColumn.Name = 'Install'; $installColumn.HeaderText = 'Уст.'; $installColumn.FillWeight = 6
+$installColumn.Name = 'Install'; $installColumn.HeaderText = 'Выбрать'; $installColumn.FillWeight = 7
 $installColumn.ReadOnly = $false; $installColumn.SortMode = 'NotSortable'
 [void]$resultsGrid.Columns.Add($installColumn)
 foreach ($definition in @(
@@ -367,11 +377,13 @@ function Update-ModGrid {
 
 function Set-BusyState {
     param([bool]$Busy, [string]$Text)
-    foreach ($control in @($loadButton, $addButton, $searchCheckedButton, $searchAllButton, $activateInstalledButton, $selectAllButton, $selectInactiveButton, $clearButton)) { $control.Enabled = -not $Busy }
+    foreach ($control in @($loadButton, $addButton, $settingsButton, $searchCheckedButton, $searchAllButton, $activateInstalledButton, $machineTranslationButton, $selectAllButton, $selectInactiveButton, $clearButton)) { $control.Enabled = -not $Busy }
     $cancelButton.Enabled = $Busy
-    $installButton.Enabled = -not $Busy -and @($resultsGrid.Rows | Where-Object { -not $_.Cells['Install'].ReadOnly }).Count -gt 0
-    $selectFoundButton.Enabled = $installButton.Enabled
+    $hasFoundRows = @($resultsGrid.Rows | Where-Object { $_.Tag -and @($_.Tag.Candidates).Count -gt 0 }).Count -gt 0
+    $installButton.Enabled = -not $Busy -and $hasFoundRows
+    $selectFoundButton.Enabled = -not $Busy -and @($resultsGrid.Rows | Where-Object { -not $_.Cells['Install'].ReadOnly }).Count -gt 0
     $selectCurrentVersionsButton.Enabled = $installButton.Enabled
+    $machineTranslationButton.Enabled = -not $Busy -and @($resultsGrid.Rows | Where-Object { (Get-ResultCategory $_.Tag) -eq 'Перевод не найден' }).Count -gt 0
     if ($Busy) { $progress.Style = 'Marquee'; $progress.MarqueeAnimationSpeed = 25 } else { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 }
     if ($Text) { $statusLabel.Text = $Text }
 }
@@ -463,7 +475,7 @@ function Add-ResultRows {
         $index = $resultsGrid.Rows.Add($false, $category, $Result.Mod.Name, $Result.Status, $null, '', '', $link)
         $row = $resultsGrid.Rows[$index]
         $row.Tag = $Result
-        $row.Cells['Install'].ReadOnly = $true
+        $row.Cells['Install'].ReadOnly = $category -ne 'Перевод не найден'
         $row.Cells['Link'].Tag = $Result.SearchUrl
         Set-ResultRowStyle -Row $row -Category $category
     } else {
@@ -488,7 +500,7 @@ function Start-LoadJob {
     if (-not (Test-Path -LiteralPath $workshopRow.TextBox.Text)) { [Windows.Forms.MessageBox]::Show('Не найдена папка Workshop.', 'Ошибка', 'OK', 'Error'); return }
     $script:jobItems.Clear(); $script:jobMode = 'load'; $script:results = @()
     $resultsGrid.Rows.Clear()
-    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false; $selectCurrentVersionsButton.Enabled = $false
+    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false; $selectCurrentVersionsButton.Enabled = $false; $machineTranslationButton.Enabled = $false
     $exportButton.Enabled = $false; $openReportButton.Enabled = $false
     $script:currentJob = Start-Job -ScriptBlock {
         param($module, $config, $root)
@@ -504,7 +516,7 @@ function Start-SearchJob {
     if ($Mods.Count -eq 0) { [Windows.Forms.MessageBox]::Show('Не выбраны моды для поиска.', 'Поиск', 'OK', 'Information'); return }
     $json = $Mods | ConvertTo-Json -Depth 8 -Compress
     $script:jobItems.Clear(); $script:jobMode = 'search'; $script:results = @(); $resultsGrid.Rows.Clear()
-    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false; $selectCurrentVersionsButton.Enabled = $false
+    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false; $selectCurrentVersionsButton.Enabled = $false; $machineTranslationButton.Enabled = $false
     $include = $includeBox.Checked
     $script:currentJob = Start-Job -ScriptBlock {
         param($module, $modsJson, $parallel, $max, $includeExisting)
@@ -571,7 +583,7 @@ function Start-InstallJob {
     $progressPath = Join-Path $env:TEMP "rf-install-$operationId-progress.json"
     $stdoutPath = Join-Path $env:TEMP "rf-install-$operationId-stdout.log"
     $stderrPath = Join-Path $env:TEMP "rf-install-$operationId-stderr.log"
-    $helperPath = Join-Path $PSScriptRoot 'InstallTranslations.Helper.ps1'
+    $helperPath = Join-Path $PSScriptRoot 'helpers\InstallTranslations.Helper.ps1'
     $request = [pscustomobject]@{
         ModulePath = $modulePath
         Operation = if ($Uninstall) { 'uninstall' } else { 'install' }
@@ -690,6 +702,7 @@ $timer.Add_Tick({
             $installButton.Enabled = $found -gt 0
             $selectFoundButton.Enabled = $found -gt 0
             $selectCurrentVersionsButton.Enabled = $found -gt 0
+            $machineTranslationButton.Enabled = $notFound -gt 0
         } elseif ($script:jobMode -eq 'install') {
             $report = @($script:jobItems | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'InstallResult' } | Select-Object -Last 1)
             if ($report.Count -eq 0) {
@@ -725,6 +738,10 @@ $timer.Add_Tick({
 $timer.Start()
 
 $loadButton.Add_Click({ Start-LoadJob })
+$settingsButton.Add_Click({
+    try { [void](Show-RFSettingsDialog -ProjectRoot $projectRoot -MachineModulePath $machineModulePath -Owner $form) }
+    catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Настройки', 'OK', 'Error') | Out-Null }
+})
 $addButton.Add_Click({
     if (-not $idBox.Text.Trim()) { return }
     try {
@@ -809,6 +826,27 @@ $activateInstalledButton.Add_Click({
         return
     }
     Start-InstallJob -WorkshopIds $ids -ActivateExisting
+})
+$machineTranslationButton.Add_Click({
+    $selected = @($resultsGrid.Rows | Where-Object {
+        $_.Cells['Install'].Value -eq $true -and (Get-ResultCategory $_.Tag) -eq 'Перевод не найден'
+    } | ForEach-Object { $_.Tag.Mod })
+    if ($selected.Count -eq 0) {
+        [Windows.Forms.MessageBox]::Show('Отметьте в нижней таблице моды со статусом «Перевод не найден».', 'Машинный перевод', 'OK', 'Information') | Out-Null
+        return
+    }
+    try {
+        $settings = Get-RFMachineSettings -ProjectRoot $projectRoot
+        $message = "Настроить машинный перевод для модов: $($selected.Count)?`r`n`r`nПровайдер: $($settings.Provider)`r`nAuto Translation будет активирован и настроен переводить только выбранные моды. Перевод начнётся при следующем запуске RimWorld."
+        if ([Windows.Forms.MessageBox]::Show($message, 'Машинный перевод', 'YesNo', 'Question') -ne 'Yes') { return }
+        $report = Enable-RFMachineTranslation -Mods $selected -Settings $settings -ConfigPath $configRow.TextBox.Text `
+            -WorkshopRoots @($workshopRow.TextBox.Text) -ProjectRoot $projectRoot
+        $backupText = if ($report.BackupPath) { "`r`n`r`nРезервная копия настроек:`r`n$($report.BackupPath)" } else { '' }
+        [Windows.Forms.MessageBox]::Show("Auto Translation настроен.`r`n`r`nПровайдер: $($report.Provider)`r`nВыбрано модов: $(@($report.SelectedMods).Count)`r`nЗапустите RimWorld для выполнения перевода.$backupText", 'Машинный перевод', 'OK', 'Information') | Out-Null
+        Start-LoadJob
+    } catch {
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Не удалось настроить машинный перевод', 'OK', 'Error') | Out-Null
+    }
 })
 $selectFoundButton.Add_Click({ foreach ($row in $resultsGrid.Rows) { if (-not $row.Cells['Install'].ReadOnly) { $row.Cells['Install'].Value = $true } } })
 $selectCurrentVersionsButton.Add_Click({

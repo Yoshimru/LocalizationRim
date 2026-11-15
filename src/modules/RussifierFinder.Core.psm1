@@ -639,8 +639,9 @@ function Find-RFRussifiers {
 }
 
 function Get-RFSteamworksPath {
+    $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $candidates = @(
-        $PSScriptRoot,
+        (Join-Path $projectRoot 'bin'),
         (Join-Path $env:USERPROFILE 'Desktop\RimSort'),
         (Join-Path $env:USERPROFILE 'AppData\Local\RimSort')
     )
@@ -722,6 +723,48 @@ function Remove-RFModFromActiveList {
         throw "Не удалось изменить ModsConfig.xml; резервная копия восстановлена. $($_.Exception.Message)"
     }
     [pscustomobject]@{ Removed = $true; PackageId = $PackageId; BackupPath = $backupPath }
+}
+
+function Add-RFPackageToActiveList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PackageId,
+        [string]$ConfigPath = (Get-RFDefaultConfigPath),
+        [switch]$KeepRimSortOpen
+    )
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Не найден ModsConfig.xml: $ConfigPath" }
+    if (@(Get-Process -Name 'RimWorldWin64', 'RimWorld' -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw 'Закройте RimWorld перед изменением ModsConfig.xml.'
+    }
+    if (-not $KeepRimSortOpen) {
+        foreach ($process in @(Get-Process -Name 'RimSort' -ErrorAction SilentlyContinue)) {
+            $null = $process.CloseMainWindow()
+            if (-not $process.WaitForExit(10000)) { throw 'Закройте RimSort и повторите операцию.' }
+        }
+    }
+    $raw = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+    [xml]$before = $raw
+    $normalized = $PackageId.Trim().ToLowerInvariant()
+    $activeBefore = @($before.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+    if ($activeBefore -contains $normalized) {
+        return [pscustomobject]@{ Added = $false; PackageId = $PackageId; BackupPath = '' }
+    }
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+    $backupPath = Join-Path (Split-Path -Parent $ConfigPath) "ModsConfig.before-add-mod.$timestamp.xml"
+    Copy-Item -LiteralPath $ConfigPath -Destination $backupPath -ErrorAction Stop
+    try {
+        $line = '    <li>' + [Security.SecurityElement]::Escape($normalized) + "</li>`r`n"
+        $updated = [regex]::Replace($raw, '(?m)^(\s*</activeMods>)', { param($match) $line + $match.Groups[1].Value }, 1)
+        if ($updated -eq $raw) { throw 'Не найден закрывающий тег activeMods.' }
+        [IO.File]::WriteAllText($ConfigPath, $updated, [Text.UTF8Encoding]::new($false))
+        [xml]$verify = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+        $activeAfter = @($verify.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+        if ($activeAfter -notcontains $normalized) { throw 'Проверка добавления package ID не пройдена.' }
+    } catch {
+        Copy-Item -LiteralPath $backupPath -Destination $ConfigPath -Force
+        throw "Не удалось изменить ModsConfig.xml; резервная копия восстановлена. $($_.Exception.Message)"
+    }
+    [pscustomobject]@{ Added = $true; PackageId = $PackageId; BackupPath = $backupPath }
 }
 
 function Uninstall-RFWorkshopMod {
@@ -967,5 +1010,6 @@ Export-ModuleMember -Function @(
     'Get-RFDefaultConfigPath', 'Get-RFWorkshopRoots', 'Get-RFModMetadata', 'Get-RFInstalledMods',
     'Get-RFActiveMods', 'Get-RFModByWorkshopId', 'ConvertFrom-RFWorkshopSearchHtml',
     'Get-RFCandidateScore', 'Find-RFRussifiers', 'Install-RFTranslations',
-    'Remove-RFModFromActiveList', 'Uninstall-RFWorkshopMod', 'Export-RFReport'
+    'Add-RFPackageToActiveList', 'Remove-RFModFromActiveList',
+    'Uninstall-RFWorkshopMod', 'Export-RFReport'
 )
