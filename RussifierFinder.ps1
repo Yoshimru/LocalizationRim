@@ -64,6 +64,7 @@ $script:mods = @()
 $script:results = @()
 $script:currentJob = $null
 $script:jobMode = ''
+$script:installAction = 'install'
 $script:jobItems = New-Object System.Collections.Generic.List[object]
 $script:lastReport = ''
 
@@ -143,7 +144,7 @@ $categoryBox.Width = 225; $categoryBox.DropDownStyle = 'DropDownList'
 [void]$categoryBox.Items.AddRange(@(
     'Все категории', 'Нужен поиск', 'Русификатор активен',
     'Русификатор установлен (не активен)', 'Встроенный русский',
-    'Русификаторы', 'Файлы не найдены'
+    'Русификаторы', 'Локализаторы других языков', 'Файлы не найдены'
 ))
 $categoryBox.SelectedIndex = 0
 $actions.Controls.AddRange(@($loadButton, $idLabel, $idBox, $addButton, $filterLabel, $filterBox, $categoryLabel, $categoryBox))
@@ -154,7 +155,7 @@ $modsGrid.Dock = 'Fill'; $modsGrid.AllowUserToAddRows = $false; $modsGrid.AllowU
 $modsGrid.AllowUserToResizeRows = $false; $modsGrid.RowHeadersVisible = $false; $modsGrid.SelectionMode = 'FullRowSelect'
 $modsGrid.MultiSelect = $true; $modsGrid.AutoSizeColumnsMode = 'Fill'; $modsGrid.BackgroundColor = [Drawing.Color]::White
 $checkColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
-$checkColumn.Name = 'Check'; $checkColumn.HeaderText = 'Искать'; $checkColumn.Width = 55; $checkColumn.FillWeight = 12
+$checkColumn.Name = 'Check'; $checkColumn.HeaderText = 'Выбрать'; $checkColumn.Width = 60; $checkColumn.FillWeight = 12
 [void]$modsGrid.Columns.Add($checkColumn)
 foreach ($definition in @(
     @('Category', 'Категория', 24), @('Name', 'Мод', 38), @('PackageId', 'Package ID', 28), @('State', 'Состояние', 38)
@@ -166,20 +167,24 @@ foreach ($definition in @(
 [void]$main.Controls.Add($modsGrid, 0, 3)
 
 $searchPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-$searchPanel.Dock = 'Fill'; $searchPanel.AutoSize = $true; $searchPanel.WrapContents = $false
+$searchPanel.Dock = 'Fill'; $searchPanel.AutoSize = $true; $searchPanel.WrapContents = $true
 $selectAllButton = New-Object System.Windows.Forms.Button
 $selectAllButton.Text = 'Отметить нуждающиеся'; $selectAllButton.AutoSize = $true
+$selectInactiveButton = New-Object System.Windows.Forms.Button
+$selectInactiveButton.Text = 'Отметить неактивные переводы'; $selectInactiveButton.AutoSize = $true
 $clearButton = New-Object System.Windows.Forms.Button
 $clearButton.Text = 'Снять отметки'; $clearButton.AutoSize = $true
 $searchCheckedButton = New-Object System.Windows.Forms.Button
 $searchCheckedButton.Text = 'Искать для отмеченных'; $searchCheckedButton.AutoSize = $true
 $searchAllButton = New-Object System.Windows.Forms.Button
 $searchAllButton.Text = 'Проверить всю сборку'; $searchAllButton.AutoSize = $true
+$activateInstalledButton = New-Object System.Windows.Forms.Button
+$activateInstalledButton.Text = 'Активировать переводы'; $activateInstalledButton.AutoSize = $true
 $includeBox = New-Object System.Windows.Forms.CheckBox
 $includeBox.Text = 'искать даже при наличии русского'; $includeBox.AutoSize = $true; $includeBox.Padding = New-Object System.Windows.Forms.Padding(8, 6, 0, 0)
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = 'Остановить'; $cancelButton.AutoSize = $true; $cancelButton.Enabled = $false
-$searchPanel.Controls.AddRange(@($selectAllButton, $clearButton, $searchCheckedButton, $searchAllButton, $includeBox, $cancelButton))
+$searchPanel.Controls.AddRange(@($selectAllButton, $selectInactiveButton, $clearButton, $searchCheckedButton, $searchAllButton, $activateInstalledButton, $includeBox, $cancelButton))
 [void]$main.Controls.Add($searchPanel, 0, 4)
 
 $resultsGrid = New-Object System.Windows.Forms.DataGridView
@@ -213,19 +218,22 @@ foreach ($definition in @(
 [void]$main.Controls.Add($resultsGrid, 0, 5)
 
 $bottom = New-Object System.Windows.Forms.TableLayoutPanel
-$bottom.Dock = 'Fill'; $bottom.AutoSize = $true; $bottom.ColumnCount = 6
+$bottom.Dock = 'Fill'; $bottom.AutoSize = $true; $bottom.ColumnCount = 7
 [void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
-[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 180)))
-[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 145)))
-[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 210)))
-[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
-[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 155)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 125)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 190)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 190)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 95)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 95)))
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = 'Загрузите сборку или добавьте отдельный мод.'; $statusLabel.AutoSize = $true; $statusLabel.Anchor = 'Left'
 $progress = New-Object System.Windows.Forms.ProgressBar
 $progress.Dock = 'Fill'; $progress.Style = 'Blocks'
 $selectFoundButton = New-Object System.Windows.Forms.Button
-$selectFoundButton.Text = 'Отметить найденные'; $selectFoundButton.Dock = 'Fill'; $selectFoundButton.Enabled = $false
+$selectFoundButton.Text = 'Отметить все'; $selectFoundButton.Dock = 'Fill'; $selectFoundButton.Enabled = $false
+$selectCurrentVersionsButton = New-Object System.Windows.Forms.Button
+$selectCurrentVersionsButton.Text = 'Выбрать версии 1.5–1.7'; $selectCurrentVersionsButton.Dock = 'Fill'; $selectCurrentVersionsButton.Enabled = $false
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = 'Установить выбранные'; $installButton.Dock = 'Fill'; $installButton.Enabled = $false
 $exportButton = New-Object System.Windows.Forms.Button
@@ -233,14 +241,19 @@ $exportButton.Text = 'Экспорт...'; $exportButton.Dock = 'Fill'; $exportBu
 $openReportButton = New-Object System.Windows.Forms.Button
 $openReportButton.Text = 'Открыть отчёт'; $openReportButton.Dock = 'Fill'; $openReportButton.Enabled = $false
 [void]$bottom.Controls.Add($statusLabel, 0, 0); [void]$bottom.Controls.Add($progress, 1, 0)
-[void]$bottom.Controls.Add($selectFoundButton, 2, 0); [void]$bottom.Controls.Add($installButton, 3, 0)
-[void]$bottom.Controls.Add($exportButton, 4, 0); [void]$bottom.Controls.Add($openReportButton, 5, 0)
+[void]$bottom.Controls.Add($selectFoundButton, 2, 0); [void]$bottom.Controls.Add($selectCurrentVersionsButton, 3, 0)
+[void]$bottom.Controls.Add($installButton, 4, 0); [void]$bottom.Controls.Add($exportButton, 5, 0)
+[void]$bottom.Controls.Add($openReportButton, 6, 0)
 [void]$main.Controls.Add($bottom, 0, 6)
 
 function Get-ModStateText {
     param($Mod)
     if ($Mod.Source -eq 'missing') { return 'Файлы не найдены' }
     if ($Mod.IsTranslation) { return 'Русификатор' }
+    if ($Mod.IsLocalization) {
+        $languages = if (@($Mod.LocalizationLanguages).Count -gt 0) { @($Mod.LocalizationLanguages) -join ', ' } else { 'другой язык' }
+        return "Локализатор: $languages"
+    }
     if ($Mod.InstalledTranslation) {
         if ($Mod.InstalledTranslationActive) { return "Активен: $($Mod.InstalledTranslation)" }
         return "Установлен, но выключен: $($Mod.InstalledTranslation)"
@@ -253,6 +266,7 @@ function Get-ModCategory {
     param($Mod)
     if ($Mod.Source -eq 'missing') { return 'Файлы не найдены' }
     if ($Mod.IsTranslation) { return 'Русификаторы' }
+    if ($Mod.IsLocalization) { return 'Локализаторы других языков' }
     if ($Mod.InstalledTranslation) {
         if ($Mod.InstalledTranslationActive) { return 'Русификатор активен' }
         return 'Русификатор установлен (не активен)'
@@ -269,7 +283,8 @@ function Get-ModCategoryOrder {
         'Русификатор установлен (не активен)' { return 3 }
         'Встроенный русский' { return 4 }
         'Русификаторы' { return 5 }
-        'Файлы не найдены' { return 6 }
+        'Локализаторы других языков' { return 6 }
+        'Файлы не найдены' { return 7 }
         default { return 99 }
     }
 }
@@ -282,6 +297,7 @@ function Get-ModCategoryColor {
         'Русификатор установлен (не активен)' { return [Drawing.Color]::FromArgb(226, 238, 250) }
         'Встроенный русский' { return [Drawing.Color]::FromArgb(224, 245, 237) }
         'Русификаторы' { return [Drawing.Color]::FromArgb(238, 238, 238) }
+        'Локализаторы других языков' { return [Drawing.Color]::FromArgb(235, 226, 248) }
         'Файлы не найдены' { return [Drawing.Color]::FromArgb(248, 220, 223) }
         default { return [Drawing.Color]::White }
     }
@@ -289,7 +305,12 @@ function Get-ModCategoryColor {
 
 function Test-ModNeedsSearch {
     param($Mod)
-    return $Mod.Source -ne 'missing' -and -not $Mod.IsTranslation -and -not $Mod.HasBuiltInRussian -and -not $Mod.InstalledTranslation
+    return $Mod.Source -ne 'missing' -and -not $Mod.IsLocalization -and -not $Mod.HasBuiltInRussian -and -not $Mod.InstalledTranslation
+}
+
+function Test-ModCanActivateTranslation {
+    param($Mod)
+    return $Mod.InstalledTranslation -and -not $Mod.InstalledTranslationActive -and $Mod.InstalledTranslationId
 }
 
 function Update-ModGrid {
@@ -303,9 +324,12 @@ function Update-ModGrid {
         $category = Get-ModCategory $mod
         if ($query -and "$($mod.Name) $($mod.PackageId)" -notlike "*$query*") { continue }
         if ($selectedCategory -and $selectedCategory -ne 'Все категории' -and $category -ne $selectedCategory) { continue }
-        $index = $modsGrid.Rows.Add((Test-ModNeedsSearch $mod), $category, $mod.Name, $mod.PackageId, (Get-ModStateText $mod))
+        $needsSearch = Test-ModNeedsSearch $mod
+        $canActivate = Test-ModCanActivateTranslation $mod
+        $index = $modsGrid.Rows.Add($needsSearch, $category, $mod.Name, $mod.PackageId, (Get-ModStateText $mod))
         $row = $modsGrid.Rows[$index]
         $row.Tag = $mod
+        $row.Cells['Check'].ReadOnly = -not ($needsSearch -or $canActivate)
         $row.DefaultCellStyle.BackColor = Get-ModCategoryColor $category
     }
     $needSearch = @($script:mods | Where-Object { (Get-ModCategory $_) -eq 'Нужен поиск' }).Count
@@ -316,10 +340,11 @@ function Update-ModGrid {
 
 function Set-BusyState {
     param([bool]$Busy, [string]$Text)
-    foreach ($control in @($loadButton, $addButton, $searchCheckedButton, $searchAllButton, $selectAllButton, $clearButton)) { $control.Enabled = -not $Busy }
+    foreach ($control in @($loadButton, $addButton, $searchCheckedButton, $searchAllButton, $activateInstalledButton, $selectAllButton, $selectInactiveButton, $clearButton)) { $control.Enabled = -not $Busy }
     $cancelButton.Enabled = $Busy
     $installButton.Enabled = -not $Busy -and @($resultsGrid.Rows | Where-Object { -not $_.Cells['Install'].ReadOnly }).Count -gt 0
     $selectFoundButton.Enabled = $installButton.Enabled
+    $selectCurrentVersionsButton.Enabled = $installButton.Enabled
     if ($Busy) { $progress.Style = 'Marquee'; $progress.MarqueeAnimationSpeed = 25 } else { $progress.Style = 'Blocks'; $progress.MarqueeAnimationSpeed = 0 }
     if ($Text) { $statusLabel.Text = $Text }
 }
@@ -339,6 +364,7 @@ function Get-ResultCategory {
     if ($status -match '^Установлен, но не активен') { return 'Русификатор установлен' }
     if ($status -eq 'Русский встроен') { return 'Встроенный русский' }
     if ($status -eq 'Это русификатор') { return 'Языковой мод' }
+    if ($status -match '^Локализатор:') { return 'Другой локализатор' }
     if ($status -eq 'Файлы мода не найдены') { return 'Файлы не найдены' }
     return 'Прочее'
 }
@@ -353,7 +379,8 @@ function Get-ResultCategoryOrder {
         'Русификатор установлен' { return 5 }
         'Встроенный русский' { return 6 }
         'Языковой мод' { return 7 }
-        'Файлы не найдены' { return 8 }
+        'Другой локализатор' { return 8 }
+        'Файлы не найдены' { return 9 }
         default { return 99 }
     }
 }
@@ -368,6 +395,7 @@ function Get-ResultCategoryColor {
         'Русификатор установлен' { return [Drawing.Color]::FromArgb(220, 235, 250) }
         'Встроенный русский' { return [Drawing.Color]::FromArgb(224, 245, 237) }
         'Языковой мод' { return [Drawing.Color]::FromArgb(238, 238, 238) }
+        'Другой локализатор' { return [Drawing.Color]::FromArgb(235, 226, 248) }
         'Файлы не найдены' { return [Drawing.Color]::FromArgb(242, 222, 222) }
         default { return [Drawing.Color]::White }
     }
@@ -433,7 +461,7 @@ function Start-LoadJob {
     if (-not (Test-Path -LiteralPath $workshopRow.TextBox.Text)) { [Windows.Forms.MessageBox]::Show('Не найдена папка Workshop.', 'Ошибка', 'OK', 'Error'); return }
     $script:jobItems.Clear(); $script:jobMode = 'load'; $script:results = @()
     $resultsGrid.Rows.Clear()
-    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false
+    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false; $selectCurrentVersionsButton.Enabled = $false
     $exportButton.Enabled = $false; $openReportButton.Enabled = $false
     $script:currentJob = Start-Job -ScriptBlock {
         param($module, $config, $root)
@@ -449,7 +477,7 @@ function Start-SearchJob {
     if ($Mods.Count -eq 0) { [Windows.Forms.MessageBox]::Show('Не выбраны моды для поиска.', 'Поиск', 'OK', 'Information'); return }
     $json = $Mods | ConvertTo-Json -Depth 8 -Compress
     $script:jobItems.Clear(); $script:jobMode = 'search'; $script:results = @(); $resultsGrid.Rows.Clear()
-    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false
+    $installButton.Enabled = $false; $selectFoundButton.Enabled = $false; $selectCurrentVersionsButton.Enabled = $false
     $include = $includeBox.Checked
     $script:currentJob = Start-Job -ScriptBlock {
         param($module, $modsJson, $parallel, $max, $includeExisting)
@@ -483,12 +511,24 @@ function Get-SelectedTranslationCandidates {
 }
 
 function Start-InstallJob {
-    $candidates = @(Get-SelectedTranslationCandidates)
-    if ($candidates.Count -eq 0) {
-        [Windows.Forms.MessageBox]::Show('Отметьте найденные русификаторы в колонке «Уст.».', 'Установка', 'OK', 'Information')
-        return
+    param(
+        [string[]]$WorkshopIds = @(),
+        [switch]$ActivateExisting
+    )
+    if ($WorkshopIds.Count -eq 0) {
+        $candidates = @(Get-SelectedTranslationCandidates)
+        if ($candidates.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show('Отметьте найденные русификаторы в колонке «Уст.».', 'Установка', 'OK', 'Information')
+            return
+        }
+        $WorkshopIds = @($candidates.WorkshopId)
     }
-    $message = "Будет оформлена подписка на $($candidates.Count) русификаторов.`r`n`r`nПосле загрузки они будут добавлены в ModsConfig.xml. Перед изменением создаётся резервная копия. RimWorld должен быть закрыт; открытый RimSort будет закрыт автоматически.`r`n`r`nПродолжить?"
+    $WorkshopIds = @($WorkshopIds | Where-Object { $_ } | Select-Object -Unique)
+    if ($ActivateExisting) {
+        $message = "Будет активировано уже скачанных русификаторов: $($WorkshopIds.Count).`r`n`r`nОни будут добавлены в ModsConfig.xml. Перед изменением создаётся резервная копия. RimWorld должен быть закрыт.`r`n`r`nПродолжить?"
+    } else {
+        $message = "Будет оформлена подписка на $($WorkshopIds.Count) русификаторов.`r`n`r`nПосле загрузки они будут добавлены в ModsConfig.xml. Перед изменением создаётся резервная копия. RimWorld должен быть закрыт; открытый RimSort будет закрыт автоматически.`r`n`r`nПродолжить?"
+    }
     if ([Windows.Forms.MessageBox]::Show($message, 'Подписка и добавление', 'YesNo', 'Question') -ne 'Yes') { return }
     $operationId = [guid]::NewGuid().ToString('N')
     $requestPath = Join-Path $env:TEMP "rf-install-$operationId-request.json"
@@ -499,15 +539,33 @@ function Start-InstallJob {
     $helperPath = Join-Path $PSScriptRoot 'InstallTranslations.Helper.ps1'
     $request = [pscustomobject]@{
         ModulePath = $modulePath
-        WorkshopIds = @($candidates.WorkshopId)
+        WorkshopIds = @($WorkshopIds)
         ConfigPath = $configRow.TextBox.Text
         WorkshopRoots = @($workshopRow.TextBox.Text)
         KeepRimSortOpen = $false
     }
     [IO.File]::WriteAllText($requestPath, ($request | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
     $script:jobItems.Clear(); $script:jobMode = 'install'
+    $script:installAction = if ($ActivateExisting) { 'activate' } else { 'install' }
     $script:currentJob = Start-Job -ScriptBlock {
         param($helper, $requestFile, $resultFile, $progressFile, $stdoutFile, $stderrFile)
+        function Read-SharedUtf8File {
+            param([string]$Path)
+            $stream = $null
+            $reader = $null
+            try {
+                $stream = New-Object IO.FileStream(
+                    $Path,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    [IO.FileShare]::ReadWrite
+                )
+                $reader = New-Object IO.StreamReader($stream, [Text.UTF8Encoding]::new($false), $true)
+                return $reader.ReadToEnd()
+            } finally {
+                if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() }
+            }
+        }
         $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -RequestPath "{1}" -ResultPath "{2}" -ProgressPath "{3}"' -f `
             $helper, $requestFile, $resultFile, $progressFile
         $process = $null
@@ -518,7 +576,7 @@ function Start-InstallJob {
             while (-not $process.HasExited) {
                 if (Test-Path -LiteralPath $progressFile) {
                     try {
-                        $progressJson = [IO.File]::ReadAllText($progressFile, [Text.UTF8Encoding]::new($false))
+                        $progressJson = Read-SharedUtf8File $progressFile
                         if ($progressJson -and $progressJson -ne $lastProgress) {
                             $lastProgress = $progressJson
                             Write-Output ($progressJson | ConvertFrom-Json)
@@ -530,7 +588,7 @@ function Start-InstallJob {
             }
             if (Test-Path -LiteralPath $progressFile) {
                 try {
-                    $progressJson = [IO.File]::ReadAllText($progressFile, [Text.UTF8Encoding]::new($false))
+                    $progressJson = Read-SharedUtf8File $progressFile
                     if ($progressJson -and $progressJson -ne $lastProgress) { Write-Output ($progressJson | ConvertFrom-Json) }
                 } catch {}
             }
@@ -545,9 +603,10 @@ function Start-InstallJob {
             Remove-Item $requestFile, $resultFile, $progressFile, $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
         }
     } -ArgumentList $helperPath, $requestPath, $resultPath, $progressPath, $stdoutPath, $stderrPath
-    Set-BusyState $true "Установка $($candidates.Count) русификаторов..."
+    $operationText = if ($ActivateExisting) { 'Активация' } else { 'Установка' }
+    Set-BusyState $true "$operationText $($WorkshopIds.Count) русификаторов..."
     $cancelButton.Enabled = $false
-    $progress.Style = 'Blocks'; $progress.Minimum = 0; $progress.Maximum = [Math]::Max(1, $candidates.Count); $progress.Value = 0
+    $progress.Style = 'Blocks'; $progress.Minimum = 0; $progress.Maximum = [Math]::Max(1, $WorkshopIds.Count); $progress.Value = 0
 }
 
 $timer = New-Object System.Windows.Forms.Timer
@@ -592,13 +651,15 @@ $timer.Add_Tick({
             $openReportButton.Enabled = $false
             $installButton.Enabled = $found -gt 0
             $selectFoundButton.Enabled = $found -gt 0
+            $selectCurrentVersionsButton.Enabled = $found -gt 0
         } elseif ($script:jobMode -eq 'install') {
             $report = @($script:jobItems | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'InstallResult' } | Select-Object -Last 1)
             if ($report.Count -eq 0) {
                 [Windows.Forms.MessageBox]::Show('Steam не вернул отчёт об установке.', 'Установка', 'OK', 'Error')
             } else {
                 $item = $report[0]
-                $summary = "Подписка завершена.`r`n`r`nДобавлено в список модов: $(@($item.Added).Count)`r`nУже были активны: $(@($item.AlreadyActive).Count)`r`nНе удалось установить: $(@($item.Failed).Count)"
+                $summaryTitle = if ($script:installAction -eq 'activate') { 'Активация завершена.' } else { 'Подписка завершена.' }
+                $summary = "$summaryTitle`r`n`r`nДобавлено в список модов: $(@($item.Added).Count)`r`nУже были активны: $(@($item.AlreadyActive).Count)`r`nНе удалось установить: $(@($item.Failed).Count)"
                 if ($item.BackupPath) { $summary += "`r`n`r`nРезервная копия:`r`n$($item.BackupPath)" }
                 $icon = if (@($item.Failed).Count -gt 0) { 'Warning' } else { 'Information' }
                 [Windows.Forms.MessageBox]::Show($summary, 'Установка русификаторов', 'OK', $icon)
@@ -634,11 +695,50 @@ $addButton.Add_Click({
 $filterBox.Add_TextChanged({ Update-ModGrid })
 $categoryBox.Add_SelectedIndexChanged({ Update-ModGrid })
 $selectAllButton.Add_Click({ foreach ($row in $modsGrid.Rows) { $row.Cells['Check'].Value = Test-ModNeedsSearch $row.Tag } })
+$selectInactiveButton.Add_Click({ foreach ($row in $modsGrid.Rows) { $row.Cells['Check'].Value = Test-ModCanActivateTranslation $row.Tag } })
 $clearButton.Add_Click({ foreach ($row in $modsGrid.Rows) { $row.Cells['Check'].Value = $false } })
+$activateInstalledButton.Add_Click({
+    $selected = @($modsGrid.Rows | Where-Object {
+        $_.Cells['Check'].Value -eq $true -and (Test-ModCanActivateTranslation $_.Tag)
+    } | ForEach-Object { $_.Tag })
+    $ids = @($selected | Select-Object -ExpandProperty InstalledTranslationId -Unique)
+    if ($ids.Count -eq 0) {
+        [Windows.Forms.MessageBox]::Show('Отметьте в верхней таблице моды из категории «Русификатор установлен (не активен)».', 'Активация переводов', 'OK', 'Information') | Out-Null
+        return
+    }
+    Start-InstallJob -WorkshopIds $ids -ActivateExisting
+})
 $selectFoundButton.Add_Click({ foreach ($row in $resultsGrid.Rows) { if (-not $row.Cells['Install'].ReadOnly) { $row.Cells['Install'].Value = $true } } })
+$selectCurrentVersionsButton.Add_Click({
+    $selectedCount = 0
+    $skippedCount = 0
+    foreach ($row in $resultsGrid.Rows) {
+        $result = $row.Tag
+        if (-not $result -or @($result.Candidates).Count -eq 0 -or $row.Cells['Install'].ReadOnly) { continue }
+        $compatible = @($result.Candidates | ForEach-Object {
+            $candidate = $_
+            $versions = @($candidate.Versions)
+            $rank = if ($versions -contains '1.7') { 3 } elseif ($versions -contains '1.6') { 2 } elseif ($versions -contains '1.5') { 1 } else { 0 }
+            if ($rank -gt 0) { [pscustomobject]@{ Candidate = $candidate; VersionRank = $rank } }
+        } | Sort-Object @{ Expression = 'VersionRank'; Descending = $true }, @{ Expression = { $_.Candidate.Score }; Descending = $true })
+        if ($compatible.Count -gt 0) {
+            $best = $compatible[0].Candidate
+            $row.Cells['Russifier'].Value = Get-CandidateDisplayText $best
+            Set-ResultRowCandidate -Row $row -Candidate $best
+            $row.Cells['Install'].Value = $true
+            $selectedCount++
+        } else {
+            $row.Cells['Install'].Value = $false
+            $skippedCount++
+        }
+    }
+    $statusLabel.Text = "Выбрано переводов для версий 1.5–1.7: $selectedCount | Без подходящей версии: $skippedCount"
+})
 $installButton.Add_Click({ Start-InstallJob })
 $searchCheckedButton.Add_Click({
-    $selected = @($modsGrid.Rows | Where-Object { $_.Cells['Check'].Value -eq $true } | ForEach-Object { $_.Tag })
+    $selected = @($modsGrid.Rows | Where-Object {
+        $_.Cells['Check'].Value -eq $true -and (Test-ModNeedsSearch $_.Tag)
+    } | ForEach-Object { $_.Tag })
     Start-SearchJob -Mods $selected
 })
 $searchAllButton.Add_Click({ Start-SearchJob -Mods @($script:mods) })

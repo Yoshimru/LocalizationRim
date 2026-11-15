@@ -4,6 +4,49 @@ $ErrorActionPreference = 'Stop'
 $script:RimWorldAppId = '294100'
 $script:RussianPattern = '(?i)(russian|русск|русифик|перевод|(^|[\s._\-\[\(])(ru|rus)([\s._\-\]\)]|$))'
 $script:TranslationPattern = '(?i)(translation|language\s*pack|locali[sz]ation|русск|русифик|перевод)'
+$script:LocalizationPattern = '(?i)(translation|language\s*pack|locali[sz]ation|русск|русифик|перевод|汉化|中文版|中文|简中|繁中|中译|翻译|翻譯|\[(cn|zh|ko|kr|jp|ja|de|fr|es|pl|pt|ua|ukr)\]|zh-(cn|tw)|korean|한국어|한글|japanese|日本語|deutsch|german|français|french|español|spanish|polski|polish|portugu|україн|украин)'
+
+function Get-RFLocalizationLanguages {
+    param(
+        [string[]]$LanguageNames = @(),
+        [string]$IdentityText = ''
+    )
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($language in @($LanguageNames)) {
+        $display = switch -Regex ([string]$language) {
+            '(?i)^English' { $null; break }
+            '(?i)^Russian|^Рус' { 'Русский'; break }
+            '(?i)ChineseSimplified|简体|简中' { 'Китайский (упрощённый)'; break }
+            '(?i)ChineseTraditional|繁體|繁中' { 'Китайский (традиционный)'; break }
+            '(?i)^Chinese|中文' { 'Китайский'; break }
+            '(?i)^Korean|한국|한글' { 'Корейский'; break }
+            '(?i)^Japanese|日本' { 'Японский'; break }
+            '(?i)^German|Deutsch' { 'Немецкий'; break }
+            '(?i)^French|Français' { 'Французский'; break }
+            '(?i)^Spanish|Español' { 'Испанский'; break }
+            '(?i)^Polish|Polski' { 'Польский'; break }
+            '(?i)^Portuguese|Português' { 'Португальский'; break }
+            '(?i)^Ukrain|Україн' { 'Украинский'; break }
+            default { if ($language) { [string]$language } else { $null } }
+        }
+        if ($display -and -not $result.Contains($display)) { $result.Add($display) }
+    }
+    if ($result.Count -eq 0 -and $IdentityText) {
+        $inferred = if ($IdentityText -match $script:RussianPattern) { 'Русский' }
+            elseif ($IdentityText -match '(?i)(汉化|中文|简中|繁中|\[cn\]|(^|[._-])(cn|zh)($|[._-]))') { 'Китайский' }
+            elseif ($IdentityText -match '(?i)(korean|한국어|한글|(^|[._-])(ko|kr)($|[._-]))') { 'Корейский' }
+            elseif ($IdentityText -match '(?i)(japanese|日本語|(^|[._-])(jp|ja)($|[._-]))') { 'Японский' }
+            elseif ($IdentityText -match '(?i)(german|deutsch|(^|[._-])de($|[._-]))') { 'Немецкий' }
+            elseif ($IdentityText -match '(?i)(french|français|(^|[._-])fr($|[._-]))') { 'Французский' }
+            elseif ($IdentityText -match '(?i)(spanish|español|(^|[._-])es($|[._-]))') { 'Испанский' }
+            elseif ($IdentityText -match '(?i)(polish|polski|(^|[._-])pl($|[._-]))') { 'Польский' }
+            elseif ($IdentityText -match '(?i)(portugu|(^|[._-])pt($|[._-]))') { 'Португальский' }
+            elseif ($IdentityText -match '(?i)(україн|украин|(^|[._-])(ua|ukr)($|[._-]))') { 'Украинский' }
+            else { 'Другой язык' }
+        $result.Add($inferred)
+    }
+    return $result.ToArray()
+}
 
 function Get-RFDefaultConfigPath {
     Join-Path $env:USERPROFILE 'AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios\Config\ModsConfig.xml'
@@ -126,7 +169,9 @@ function Get-RFModMetadata {
     $loadAfter = @(Get-RFXmlList $meta.SelectSingleNode('loadAfter'))
     $coveredPackageIds = @(Get-RFConditionalModIds -ModPath $ModPath)
     $identityText = "$packageId $name"
-    $looksLikeTranslation = (($identityText -match $script:TranslationPattern) -or ($identityText -match $script:RussianPattern)) -and ($russianDirs.Count -gt 0)
+    $localizationLanguages = @(Get-RFLocalizationLanguages -LanguageNames @($languageDirs | Select-Object -ExpandProperty Name -Unique) -IdentityText $identityText)
+    $looksLikeLocalization = ($languageDirs.Count -gt 0) -and (($identityText -match $script:LocalizationPattern) -or ($identityText -match $script:RussianPattern))
+    $looksLikeTranslation = $looksLikeLocalization -and ($localizationLanguages -contains 'Русский')
 
     [pscustomobject]@{
         WorkshopId = [string]$WorkshopId
@@ -142,6 +187,8 @@ function Get-RFModMetadata {
         HasBuiltInRussian = ($russianDirs.Count -gt 0)
         RussianFiles = $russianFileCount
         Languages = @($languageDirs | Select-Object -ExpandProperty Name -Unique)
+        LocalizationLanguages = $localizationLanguages
+        IsLocalization = $looksLikeLocalization
         IsTranslation = $looksLikeTranslation
         InstalledTranslation = ''
         InstalledTranslationId = ''
@@ -195,7 +242,8 @@ function Get-RFActiveMods {
             $active.Add([pscustomobject]@{
                 WorkshopId = ''; PackageId = $id; Name = $id; Path = ''; AboutPath = ''; Description = ''
                 Dependencies = @(); LoadAfter = @(); CoveredPackageIds = @(); SupportedVersions = @(); HasBuiltInRussian = $false
-                RussianFiles = 0; Languages = @(); IsTranslation = ($id -match $script:RussianPattern)
+                RussianFiles = 0; Languages = @(); LocalizationLanguages = @()
+                IsLocalization = $false; IsTranslation = ($id -match $script:RussianPattern)
                 InstalledTranslation = ''; InstalledTranslationId = ''; InstalledTranslationActive = $false
                 Source = 'missing'; SteamUrl = ''
             })
@@ -233,7 +281,7 @@ function Get-RFActiveMods {
             $translationPackage = $translation.PackageId.ToLowerInvariant()
             $matchedKeys = @($activeByPackage.Keys | Where-Object {
                 $candidate = $activeByPackage[$_]
-                if ($candidate.IsTranslation -or $candidate -eq $translation) { return $false }
+                if ($candidate.IsLocalization -or $candidate -eq $translation) { return $false }
                 $candidateName = Get-RFNormalizedText $candidate.Name
                 $sameCleanName = $translationName -and $candidateName -and $translationName -eq $candidateName
                 $packageInsideTranslation = $_.Length -ge 6 -and $translationPackage.Contains($_)
@@ -252,7 +300,7 @@ function Get-RFActiveMods {
             if ($translationTokens.Count -ge 2) {
                 $matchedKeys = @($activeByPackage.Keys | Where-Object {
                     $candidate = $activeByPackage[$_]
-                    if ($candidate.IsTranslation -or $candidate -eq $translation) { return $false }
+                    if ($candidate.IsLocalization -or $candidate -eq $translation) { return $false }
                     $candidateTokens = @((Get-RFNormalizedText $candidate.Name) -split ' ' |
                         Where-Object { $_.Length -ge 3 -and $nameStopWords -notcontains $_ } |
                         Select-Object -Unique)
@@ -326,6 +374,8 @@ function Get-RFModByWorkshopId {
         Description = [string]$details.description; Dependencies = @(); LoadAfter = @(); CoveredPackageIds = @()
         SupportedVersions = @($detailTags | Where-Object { $_ -match '^1\.\d+$' })
         HasBuiltInRussian = $false; RussianFiles = 0; Languages = @()
+        LocalizationLanguages = @(Get-RFLocalizationLanguages -IdentityText $detailIdentity)
+        IsLocalization = (($detailTags -match '(?i)^Translation$') -or ($detailIdentity -match $script:LocalizationPattern))
         IsTranslation = (($detailTags -match '(?i)^Translation$') -and ($detailIdentity -match $script:RussianPattern))
         InstalledTranslation = ''; InstalledTranslationId = ''; InstalledTranslationActive = $false; Source = 'steam';
         SteamUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=$id"
@@ -433,7 +483,16 @@ function Get-RFCandidateScore {
         $score += [int](45 * $coverage)
         if ($matched.Count -gt 0) { $reasons.Add("совпало слов: $($matched.Count)/$($tokens.Count)") }
     }
-    [pscustomobject]@{ Score = $score; Reasons = @($reasons) }
+    # Keep relevance separate from the compatibility bonus. Old or unrelated
+    # translations must not pass the matching threshold only because they have
+    # current version tags.
+    $matchScore = $score
+    $has17 = @($tags) -contains '1.7'
+    $has16 = @($tags) -contains '1.6'
+    if ($has17) { $score += 35; $reasons.Add('поддержка RimWorld 1.7') }
+    if ($has16) { $score += 25; $reasons.Add('поддержка RimWorld 1.6') }
+    if ($has17 -and $has16) { $score += 10; $reasons.Add('поддержка обеих актуальных версий') }
+    [pscustomobject]@{ Score = $score; MatchScore = $matchScore; Reasons = @($reasons) }
 }
 
 function New-RFHttpClient {
@@ -467,7 +526,7 @@ function Find-RFRussifiers {
 
     $allMods = @($Mods)
     $searchable = @($allMods | Where-Object {
-        -not $_.IsTranslation -and $_.Name -and
+        -not $_.IsLocalization -and $_.Name -and
         $_.Source -ne 'missing' -and
         ($IncludeWithRussian -or (-not $_.HasBuiltInRussian -and -not $_.InstalledTranslation))
     })
@@ -476,6 +535,9 @@ function Find-RFRussifiers {
         $key = if ($mod.WorkshopId) { "w:$($mod.WorkshopId)" } else { "p:$($mod.PackageId)" }
         if ($mod.IsTranslation) {
             $resultMap[$key] = [pscustomobject]@{ Mod = $mod; Status = 'Это русификатор'; SearchUrl = ''; Candidates = @(); Error = '' }
+        } elseif ($mod.IsLocalization) {
+            $languages = if (@($mod.LocalizationLanguages).Count -gt 0) { @($mod.LocalizationLanguages) -join ', ' } else { 'другой язык' }
+            $resultMap[$key] = [pscustomobject]@{ Mod = $mod; Status = "Локализатор: $languages"; SearchUrl = ''; Candidates = @(); Error = '' }
         } elseif ($mod.Source -eq 'missing') {
             $resultMap[$key] = [pscustomobject]@{ Mod = $mod; Status = 'Файлы мода не найдены'; SearchUrl = ''; Candidates = @(); Error = '' }
         } elseif ($mod.InstalledTranslation -and -not $IncludeWithRussian) {
@@ -553,7 +615,7 @@ function Find-RFRussifiers {
                 }
             } else { $rawCandidate }
             $rating = Get-RFCandidateScore -Source $record.Mod -Candidate $candidate
-            if ($rating.Score -ge $MinimumScore) {
+            if ($rating.MatchScore -ge $MinimumScore) {
                 $scored.Add([pscustomobject]@{
                     WorkshopId = $candidate.WorkshopId; Title = $candidate.Title; Url = $candidate.Url
                     Score = $rating.Score; Reasons = @($rating.Reasons); Tags = @($candidate.Tags)
