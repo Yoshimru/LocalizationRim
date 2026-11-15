@@ -1,0 +1,516 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Text;
+using System.Text.RegularExpressions;
+using UnityEngine.Networking;
+using Verse;
+using AutoTranslation;
+using AutoTranslation.Services;
+using AutoTranslation.Utilities;
+
+namespace AutoTranslation.Translators
+{
+    public class Translator_Google : Translator_BaseTraditional
+    {
+        private const string urlFormat = "https://{0}/translate_a/single?client=gtx&sl={1}&tl={2}&dt=t&ie=UTF-8&oe=UTF-8&q={3}";
+        private const string DirectHost = "translate.google.com";
+        private const string ChinaProxyHost = "google-translate-proxy.tantu.com";
+
+        private const string UserAgent = NetworkHelper.DefaultUserAgent;
+        private static readonly Dictionary<string, string> requestHeaders = new Dictionary<string, string>
+        {
+            ["User-Agent"] = UserAgent
+        };
+
+        private const int QueueBatchTokens = 750;
+        private const int MaxBatchQueryLength = 6000;
+
+        private const int RequestsPerMinute = 60;
+        private static readonly RateLimiter rateLimiter = new RateLimiter(RequestsPerMinute);
+
+        private static readonly TimeSpan BanCooldown = TimeSpan.FromMinutes(5);
+        private const int MaxBanWaits = 3;
+
+        public override string Name  => "Google";
+
+        // Not cached: the user can change the target language override at runtime
+        public override string TranslateLanguage => GetTranslateLanguage();
+        public override bool RequiresKey => false;
+
+        public override void Prepare()
+        {
+            // No connectivity preflight
+            Ready = true;
+        }
+
+        public override bool SupportsBatchTranslation => true;
+        public override int BatchSizeTokens => QueueBatchTokens;
+
+        public override bool TryTranslate(string text, out string translated)
+        {
+            return TryTranslate(text, out translated, false);
+        }
+
+        // skipRetry = interactive call from the settings UI (main thread): one attempt, never
+        // waits out a 429 cooldown - blocking there freezes the game for minutes
+        public override bool TryTranslate(string text, out string translated, bool skipRetry)
+        {
+            try
+            {
+                // Protect placeholders
+                var (protectedText, placeholders) = text.ProtectPlaceholders();
+
+                var targetLang = TranslateLanguage;
+                var url = BuildUrl(protectedText, targetLang);
+                var t = ParseResult(skipRetry ? RequestOnce(url) : RequestWithCooldown(url), out var detectedLang);
+
+                // Restore placeholders
+                var (restoredText, allRestored) = t.RestorePlaceholders(placeholders);
+
+                translated = detectedLang == targetLang ? text : restoredText;
+
+                if (!allRestored)
+                {
+                    Log.Warning(AutoTranslation.LogPrefix + $"{Name}: Some placeholders were not properly restored. Using original text.");
+                    translated = text;
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception e)
+            {
+                var msg = AutoTranslation.LogPrefix + $"{Name}, translate failed. reason: {e.GetType()}|{e.Message}";
+                Log.WarningOnce(msg + $", target: {text}", msg.GetHashCode());
+                translated = text;
+                return false;
+            }
+        }
+
+        private sealed class BatchItem
+        {
+            public string Original;
+            public Dictionary<string, string> Placeholders;
+            public string[] Lines;
+            public List<int> SentLines;
+            public int EscapedLength;
+        }
+
+        public override bool TryTranslateBatch(List<string> texts, out List<string> translated)
+        {
+            translated = new List<string>(texts ?? new List<string>());
+            if (translated.Count == 0) return true;
+
+            try
+            {
+                var targetLang = TranslateLanguage;
+                var allSuccess = true;
+                var chunk = new List<int>();
+                var chunkLength = 0;
+                var items = texts.Select(PrepareBatchItem).ToList();
+
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (chunk.Count > 0 && chunkLength + items[i].EscapedLength > MaxBatchQueryLength)
+                    {
+                        allSuccess &= TranslateChunk(items, chunk, targetLang, translated);
+                        chunk.Clear();
+                        chunkLength = 0;
+                    }
+                    chunk.Add(i);
+                    chunkLength += items[i].EscapedLength;
+                }
+                if (chunk.Count > 0) allSuccess &= TranslateChunk(items, chunk, targetLang, translated);
+
+                return allSuccess;
+            }
+            catch (Exception e)
+            {
+                var msg = AutoTranslation.LogPrefix + $"{Name}, batch translate failed. reason: {e.GetType()}|{e.Message}";
+                Log.WarningOnce(msg, msg.GetHashCode());
+                translated = new List<string>(texts);
+                return false;
+            }
+        }
+
+        private static BatchItem PrepareBatchItem(string text)
+        {
+            var (protectedText, placeholders) = text.ProtectPlaceholders();
+            var item = new BatchItem
+            {
+                Original = text,
+                Placeholders = placeholders,
+                Lines = (protectedText ?? string.Empty).Split('\n'),
+                SentLines = new List<int>()
+            };
+            for (int i = 0; i < item.Lines.Length; i++)
+            {
+                var line = item.Lines[i].Trim();
+                if (line.Length == 0) continue; // blank lines are kept locally, never sent
+                item.SentLines.Add(i);
+                item.EscapedLength += UnityWebRequest.EscapeURL(line).Length + 3; // + "%0A"
+            }
+            return item;
+        }
+
+        private bool TranslateChunk(List<BatchItem> items, List<int> chunk, string targetLang, List<string> results)
+        {
+            if (chunk.Count == 1) return TranslateSingle(items[chunk[0]], chunk[0], results);
+
+            var sendLines = new List<string>();
+            foreach (var idx in chunk)
+                foreach (var li in items[idx].SentLines)
+                    sendLines.Add(items[idx].Lines[li].Trim());
+
+            if (sendLines.Count == 0)
+            {
+                foreach (var idx in chunk) results[idx] = items[idx].Original;
+                return true;
+            }
+
+            var response = ParseResult(RequestWithCooldown(BuildUrl(string.Join("\n", sendLines), targetLang)), out var detectedLang);
+            var outLines = response.Split('\n');
+            var outCount = outLines.Length;
+            if (outCount == sendLines.Count + 1 && outLines[outCount - 1].Trim().Length == 0) outCount--;
+
+            if (outCount != sendLines.Count || detectedLang == targetLang)
+            {
+                Log.Warning(AutoTranslation.LogPrefix + $"{Name}: batch response did not match the request ({outCount}/{sendLines.Count} lines, detected '{detectedLang}'). Translating {chunk.Count} texts one by one.");
+                var ok = true;
+                foreach (var idx in chunk) ok &= TranslateSingle(items[idx], idx, results);
+                return ok;
+            }
+
+            var allSuccess = true;
+            var cursor = 0;
+            foreach (var idx in chunk)
+            {
+                var item = items[idx];
+                var lines = (string[])item.Lines.Clone();
+                foreach (var li in item.SentLines)
+                {
+                    var original = lines[li];
+                    var leading = original.Substring(0, original.Length - original.TrimStart().Length);
+                    var trailing = original.Substring(original.TrimEnd().Length);
+                    lines[li] = leading + outLines[cursor++].Trim() + trailing;
+                }
+
+                var (restoredText, allRestored) = string.Join("\n", lines).RestorePlaceholders(item.Placeholders);
+                if (allRestored)
+                    results[idx] = restoredText;
+                else
+                    allSuccess &= TranslateSingle(item, idx, results);
+            }
+            return allSuccess;
+        }
+
+        private bool TranslateSingle(BatchItem item, int idx, List<string> results)
+        {
+            var ok = TryTranslate(item.Original, out var single);
+            results[idx] = single;
+            return ok;
+        }
+
+        private string BuildUrl(string text, string targetLang)
+        {
+            var host = targetLang == "zh-CN" ? ChinaProxyHost : DirectHost;
+            return string.Format(urlFormat, host, StartLanguage, targetLang, UnityWebRequest.EscapeURL(text));
+        }
+
+        private sealed class RateLimitedException : Exception
+        {
+            public RateLimitedException() : base("HTTP 429 Too Many Requests") { }
+        }
+
+        private static bool IsRateLimited(Exception e)
+        {
+            return e is RateLimitedException || (e is WebException we && NetworkHelper.IsRateLimited(we));
+        }
+
+        private const int MaxTransportRetries = 3;
+        private const int TransportRetryBaseDelayMs = 5000;
+        private static string loggedHttpStack;
+
+        private delegate string TlsGet(string url, string userAgent, int timeoutMs, out int statusCode);
+
+        // Google flags individual TLS connections, not only the IP: a 429 on one connection is often
+        // followed by a 200 on a fresh one, so retry once before treating it as a ban
+        private string SendRetryingOn429(string url, int maxRetries, int timeoutMs)
+        {
+            try
+            {
+                return Send(url, maxRetries, timeoutMs);
+            }
+            catch (Exception e) when (IsRateLimited(e))
+            {
+#if RW17
+                Tls13Client.Reset();
+#endif
+                return Send(url, maxRetries, timeoutMs);
+            }
+        }
+
+        private string Send(string url, int maxRetries, int timeoutMs)
+        {
+            string body = null;
+            string stack = null;
+#if RW17
+            if (Tls13Client.IsSupported)
+            {
+                try
+                {
+                    body = SendWithTls(Tls13Client.Get, url, maxRetries, timeoutMs);
+                    stack = "TLS 1.3";
+                }
+                catch (NotSupportedException e)
+                {
+                    Tls13Client.Disable();
+                    Log.Warning(AutoTranslation.LogPrefix + $"{Name}: TLS 1.3 unavailable ({e.Message}), falling back to the default HTTP client. Google may reject it with 429.");
+                }
+            }
+#else
+            if (MonoTlsClient.IsSupported)
+            {
+                try
+                {
+                    body = SendWithTls(MonoTlsClient.Get, url, maxRetries, timeoutMs);
+                    stack = "Mono (browser-like ciphers)";
+                }
+                catch (Exception e) when (e is TypeLoadException || e is MissingMethodException || e is NotSupportedException || e is InvalidCastException)
+                {
+                    MonoTlsClient.Disable();
+                    Log.Warning(AutoTranslation.LogPrefix + $"{Name}: custom TLS settings unavailable ({e.GetType().Name}: {e.Message}), falling back to the default HTTP client.");
+                }
+            }
+#endif
+            if (body == null)
+            {
+                body = NetworkHelper.Get(url, requestHeaders, maxRetries, timeoutMs, retryOnRateLimit: false);
+                stack = "default";
+            }
+            if (loggedHttpStack != stack)
+            {
+                loggedHttpStack = stack;
+                Log.Message(AutoTranslation.LogPrefix + $"{Name}: using {stack} HTTP client.");
+            }
+
+            // Block/CAPTCHA pages come back as HTML; never parse them as a translation
+            if (!body.TrimStart().StartsWith("["))
+                throw new WebException("Unexpected non-JSON response: " + body.Substring(0, Math.Min(100, body.Length)), WebExceptionStatus.ProtocolError);
+            return body;
+        }
+
+        /// Runs one GET with transport retries and circuit-breaker reporting
+        private static string SendWithTls(TlsGet get, string url, int maxRetries, int timeoutMs)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                int status;
+                string body;
+                try
+                {
+                    body = get(url, UserAgent, timeoutMs, out status);
+                }
+                catch (WebException e) when (NetworkHelper.IsConnectionLevelFailure(e))
+                {
+                    NetworkStateMonitor.ReportFailure();
+                    if (attempt >= maxRetries || NetworkStateMonitor.IsOpen) throw;
+                    System.Threading.Thread.Sleep(TransportRetryBaseDelayMs * (1 << attempt));
+                    continue;
+                }
+
+                NetworkStateMonitor.ReportSuccess();
+                if (status == 429) throw new RateLimitedException();
+                if (status != 200) throw new WebException($"HTTP {status}", WebExceptionStatus.ProtocolError);
+                return body;
+            }
+        }
+
+        private string RequestOnce(string url)
+        {
+            if (!rateLimiter.TryWait(TimeSpan.FromSeconds(2)))
+            {
+                var paused = rateLimiter.PausedRemaining;
+                throw new InvalidOperationException(paused > TimeSpan.Zero
+                    ? $"Google requests are paused after a 429 ({Math.Ceiling(paused.TotalMinutes)} min left)"
+                    : "Google request queue is busy, try again in a moment");
+            }
+            try
+            {
+                return SendRetryingOn429(url, 0, 10000);
+            }
+            catch (Exception e) when (IsRateLimited(e))
+            {
+                // Let the background queue back off too
+                if (rateLimiter.PauseFor(BanCooldown))
+                {
+                    Log.Warning(AutoTranslation.LogPrefix + $"{Name}: rate limited by Google (429). Pausing Google requests for {BanCooldown.TotalMinutes} minutes.");
+                }
+                throw;
+            }
+        }
+
+        private string RequestWithCooldown(string url)
+        {
+            for (int bans = 0; ; bans++)
+            {
+                rateLimiter.Wait();
+                try
+                {
+                    return SendRetryingOn429(url, MaxTransportRetries, NetworkHelper.DEFAULT_TIMEOUT_MS);
+                }
+                catch (Exception e) when (IsRateLimited(e) && bans < MaxBanWaits)
+                {
+                    if (rateLimiter.PauseFor(BanCooldown))
+                    {
+                        Log.Warning(AutoTranslation.LogPrefix + $"{Name}: rate limited by Google (429). Pausing Google requests for {BanCooldown.TotalMinutes} minutes.");
+                    }
+                }
+            }
+        }
+
+        public override bool SupportsCurrentLanguage()
+        {
+            if (Helpers.HasLanguageOverride()) return true;
+
+            var lang = LanguageDatabase.activeLanguage;
+            if (lang == null)
+            {
+                Log.Warning(AutoTranslation.LogPrefix + "activeLanguage was null");
+                return false;
+            }
+
+            return TranslateLanguageGetter.ContainsKey(lang.LegacyFolderName.NormalizeLanguageFolder());
+        }
+
+
+        internal static string ParseResult(string text, out string detectedLang)
+        {
+            var sb = new StringBuilder(text.Length);
+            detectedLang = string.Empty;
+
+            int depth = 0;
+            int i = 0;
+            int stringIndexInSegment = 0;
+            bool inSegments = true; // still inside the first (segments) array
+            while (i < text.Length)
+            {
+                var c = text[i];
+                if (c == '"')
+                {
+                    var str = ReadJsonString(text, ref i);
+                    if (inSegments && depth == 3 && stringIndexInSegment == 0)
+                    {
+                        sb.Append(str);
+                    }
+                    else if (!inSegments && depth == 1 && detectedLang.Length == 0)
+                    {
+                        detectedLang = str;
+                    }
+                    stringIndexInSegment++;
+                    continue;
+                }
+
+                if (c == '[')
+                {
+                    depth++;
+                    if (depth == 3) stringIndexInSegment = 0;
+                }
+                else if (c == ']')
+                {
+                    depth--;
+                    if (depth == 1 && inSegments) inSegments = false; // closed the segments array
+                }
+                i++;
+            }
+
+            return sb.ToString();
+        }
+
+        private static string ReadJsonString(string text, ref int i)
+        {
+            var result = new StringBuilder();
+            i++; // skip opening quote
+            while (i < text.Length)
+            {
+                var c = text[i];
+                if (c == '"') { i++; break; }
+                if (c == '\\' && i + 1 < text.Length)
+                {
+                    i++;
+                    var e = text[i];
+                    switch (e)
+                    {
+                        case 'n': result.Append('\n'); break;
+                        case 'r': result.Append('\r'); break;
+                        case 't': result.Append('\t'); break;
+                        case 'b': result.Append('\b'); break;
+                        case 'f': result.Append('\f'); break;
+                        case 'u':
+                            if (i + 4 < text.Length && int.TryParse(text.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, null, out var code))
+                            {
+                                result.Append((char)code);
+                                i += 4;
+                            }
+                            break;
+                        default: result.Append(e); break; // \" \\ \/
+                    }
+                    i++;
+                    continue;
+                }
+                result.Append(c);
+                i++;
+            }
+            return result.ToString();
+        }
+
+        private static readonly Dictionary<string, string> TranslateLanguageGetter = new Dictionary<string, string>
+        {
+            ["Korean"] = "ko",
+            ["Catalan"] = "ca",
+            ["ChineseSimplified"] = "zh-CN",
+            ["ChineseTraditional"] = "zh-TW",
+            ["Czech"] = "cs",
+            ["Danish"] = "da",
+            ["Dutch"] = "nl",
+            ["Estonian"] = "et",
+            ["Finnish"] = "fi",
+            ["French"] = "fr",
+            ["German"] = "de",
+            ["Greek"] = "el",
+            ["Hungarian"] = "hu",
+            ["Italian"] = "it",
+            ["Japanese"] = "ja",
+            ["Norwegian"] = "no",
+            ["Polish"] = "pl",
+            ["Portuguese"] = "pt-PT",
+            ["PortugueseBrazilian"] = "pt",
+            ["Romanian"] = "ro",
+            ["Russian"] = "ru",
+            ["Slovak"] = "sk",
+            ["SpanishLatin"] = "es",
+            ["Spanish"] = "es",
+            ["Swedish"] = "sv",
+            ["Turkish"] = "tr",
+            ["Ukrainian"] = "uk",
+            ["English"] = "en",
+            ["Vietnamese"] = "vi",
+            ["Thai"] = "th"
+        };
+
+        private static string GetTranslateLanguage()
+        {
+            var res = Helpers.ResolveTargetLanguage(TranslateLanguageGetter);
+            if (res == null)
+            {
+                Log.Error(AutoTranslation.LogPrefix + $"Unsupported language: {LanguageDatabase.activeLanguage?.LegacyFolderName ?? "(null)"}");
+                res = "en";
+            }
+            return res;
+        }
+    }
+}

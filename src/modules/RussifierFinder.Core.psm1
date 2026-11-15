@@ -202,10 +202,20 @@ function Get-RFInstalledMods {
     [CmdletBinding()]
     param([string[]]$WorkshopRoots = (Get-RFWorkshopRoots))
     $mods = New-Object System.Collections.Generic.List[object]
+    $scanRoots = New-Object System.Collections.Generic.List[string]
     foreach ($root in @($WorkshopRoots)) {
+        if ($root -and -not $scanRoots.Contains($root)) { $scanRoots.Add($root) }
+        try {
+            $steamApps = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $root))
+            $localMods = Join-Path $steamApps 'common\RimWorld\Mods'
+            if ((Test-Path -LiteralPath $localMods) -and -not $scanRoots.Contains($localMods)) { $scanRoots.Add($localMods) }
+        } catch {}
+    }
+    foreach ($root in $scanRoots.ToArray()) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
         foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) {
-            $mod = Get-RFModMetadata -ModPath $directory.FullName -WorkshopId $directory.Name
+            $workshopId = if ($directory.Name -match '^\d{6,}$') { $directory.Name } else { '' }
+            $mod = Get-RFModMetadata -ModPath $directory.FullName -WorkshopId $workshopId
             if ($null -ne $mod) { $mods.Add($mod) }
         }
     }

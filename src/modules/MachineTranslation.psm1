@@ -112,6 +112,51 @@ function Set-RFAutoTranslationAiSettings {
     Set-RFXmlChildValue $Document $valueNode 'RequestTimeoutSeconds' ([string]$Settings.RequestTimeoutSeconds) | Out-Null
 }
 
+function Get-RFRimWorldInstallPath {
+    param([string[]]$WorkshopRoots)
+    foreach ($root in $WorkshopRoots) {
+        try {
+            $steamApps = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $root))
+            $candidate = Join-Path $steamApps 'common\RimWorld'
+            if (Test-Path -LiteralPath $candidate) { return $candidate }
+        } catch {}
+    }
+    foreach ($candidate in @(
+        'C:\Program Files (x86)\Steam\steamapps\common\RimWorld',
+        'C:\Program Files\Steam\steamapps\common\RimWorld'
+    )) { if (Test-Path -LiteralPath $candidate) { return $candidate } }
+    throw 'Не найдена папка установки RimWorld.'
+}
+
+function Install-RFEmbeddedAutoTranslation {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string[]]$WorkshopRoots
+    )
+    $source = Join-Path $ProjectRoot 'resources\AutoTranslation'
+    if (-not (Test-Path -LiteralPath (Join-Path $source '1.7\Assemblies\AutoTranslation.dll'))) {
+        throw 'В комплекте LocalizationRim отсутствуют файлы встроенного Auto Translation.'
+    }
+    $rimWorld = Get-RFRimWorldInstallPath -WorkshopRoots $WorkshopRoots
+    $modsRoot = Join-Path $rimWorld 'Mods'
+    $destination = Join-Path $modsRoot '3278005460'
+    if (-not (Test-Path -LiteralPath $destination)) { New-Item -ItemType Directory -Path $destination -Force | Out-Null }
+    foreach ($folder in @('About', 'Languages', '1.5', '1.6', '1.7')) {
+        $from = Join-Path $source $folder
+        $to = Join-Path $destination $folder
+        if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination $destination -Recurse -Force }
+    }
+    foreach ($file in @('LICENSE.GPL-3.0.txt', 'THIRD_PARTY_NOTICE.md')) {
+        $from = Join-Path $source $file
+        if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination (Join-Path $destination $file) -Force }
+    }
+    $metadata = Get-RFModMetadata -ModPath $destination -WorkshopId '3278005460'
+    if (-not $metadata -or $metadata.PackageId -ine 'seohyeon.autotranslation') {
+        throw 'Не удалось развернуть встроенный Auto Translation.'
+    }
+    return $metadata
+}
+
 function Enable-RFMachineTranslation {
     [CmdletBinding()]
     param(
@@ -130,7 +175,11 @@ function Enable-RFMachineTranslation {
             if ($metadata -and $metadata.PackageId -ieq 'seohyeon.autotranslation') { $engine = @($metadata); break }
         }
     }
-    if ($engine.Count -eq 0) { throw 'Не установлен мод Auto Translation (Workshop ID 3278005460).' }
+    $deployedEmbedded = $false
+    if ($engine.Count -eq 0) {
+        $engine = @(Install-RFEmbeddedAutoTranslation -ProjectRoot $ProjectRoot -WorkshopRoots $WorkshopRoots)
+        $deployedEmbedded = $true
+    }
     $activation = Add-RFPackageToActiveList -PackageId $engine[0].PackageId -ConfigPath $ConfigPath
     [xml]$modsConfig = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
     $activeIds = @($modsConfig.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
@@ -164,6 +213,7 @@ function Enable-RFMachineTranslation {
     [pscustomobject]@{
         EnginePackageId = $engine[0].PackageId
         EngineActivated = $activation.Added
+        EmbeddedEngineDeployed = $deployedEmbedded
         SelectedMods = $selectedIds
         Provider = $Settings.Provider
         SettingsPath = $settingsPath
