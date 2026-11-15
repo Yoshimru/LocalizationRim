@@ -186,6 +186,9 @@ function Get-RFActiveMods {
 
     $active = New-Object System.Collections.Generic.List[object]
     foreach ($id in $activeIds) {
+        # Base game and official DLC are not Workshop mods and must not be
+        # treated as missing files or translation-search targets.
+        if ($id -match '^ludeon\.rimworld(?:\.|$)') { continue }
         if ($byPackage.ContainsKey($id)) {
             $active.Add($byPackage[$id])
         } else {
@@ -573,11 +576,11 @@ function Find-RFRussifiers {
     return $ordered.ToArray()
 }
 
-function Get-RFRimSortSteamworksPath {
+function Get-RFSteamworksPath {
     $candidates = @(
+        $PSScriptRoot,
         (Join-Path $env:USERPROFILE 'Desktop\RimSort'),
-        (Join-Path $env:USERPROFILE 'AppData\Local\RimSort'),
-        $PSScriptRoot
+        (Join-Path $env:USERPROFILE 'AppData\Local\RimSort')
     )
     foreach ($directory in $candidates) {
         if ((Test-Path -LiteralPath (Join-Path $directory 'SteamworksPy64.dll')) -and
@@ -586,7 +589,7 @@ function Get-RFRimSortSteamworksPath {
             return $directory
         }
     }
-    throw 'Не найдены SteamworksPy64.dll и steam_api64.dll. Установите или распакуйте RimSort на рабочий стол.'
+    throw 'Не найдены локальные SteamworksPy64.dll, steam_api64.dll и steam_appid.txt. Переустановите папку LocalizationRim целиком.'
 }
 
 function Initialize-RFSteamNative {
@@ -641,7 +644,7 @@ function Install-RFTranslations {
         }
     }
 
-    $steamworksPath = Get-RFRimSortSteamworksPath
+    $steamworksPath = Get-RFSteamworksPath
     $oldCurrentDirectory = [Environment]::CurrentDirectory
     $initialized = $false
     $alreadySubscribed = New-Object System.Collections.Generic.List[string]

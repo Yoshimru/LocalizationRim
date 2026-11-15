@@ -79,14 +79,14 @@ $main.Dock = 'Fill'
 $main.Padding = New-Object System.Windows.Forms.Padding(10)
 $main.ColumnCount = 1
 $main.RowCount = 7
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 44)))
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 56)))
-$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-$form.Controls.Add($main)
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 44)))
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 56)))
+[void]$main.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
+[void]$form.Controls.Add($main)
 
 function New-PathRow {
     param([string]$Label, [string]$Value, [scriptblock]$BrowseAction)
@@ -119,8 +119,8 @@ $workshopRow = New-PathRow 'Папка Workshop:' $defaultWorkshop {
     $dialog.Description = 'Выберите папку steamapps\workshop\content\294100'
     if ($dialog.ShowDialog() -eq 'OK') { $workshopRow.TextBox.Text = $dialog.SelectedPath }
 }
-$main.Controls.Add($configRow.Panel, 0, 0)
-$main.Controls.Add($workshopRow.Panel, 0, 1)
+[void]$main.Controls.Add($configRow.Panel, 0, 0)
+[void]$main.Controls.Add($workshopRow.Panel, 0, 1)
 
 $actions = New-Object System.Windows.Forms.FlowLayoutPanel
 $actions.Dock = 'Fill'; $actions.AutoSize = $true; $actions.WrapContents = $false
@@ -147,7 +147,7 @@ $categoryBox.Width = 225; $categoryBox.DropDownStyle = 'DropDownList'
 ))
 $categoryBox.SelectedIndex = 0
 $actions.Controls.AddRange(@($loadButton, $idLabel, $idBox, $addButton, $filterLabel, $filterBox, $categoryLabel, $categoryBox))
-$main.Controls.Add($actions, 0, 2)
+[void]$main.Controls.Add($actions, 0, 2)
 
 $modsGrid = New-Object System.Windows.Forms.DataGridView
 $modsGrid.Dock = 'Fill'; $modsGrid.AllowUserToAddRows = $false; $modsGrid.AllowUserToDeleteRows = $false
@@ -163,7 +163,7 @@ foreach ($definition in @(
     $column.Name = $definition[0]; $column.HeaderText = $definition[1]; $column.FillWeight = $definition[2]; $column.ReadOnly = $true
     [void]$modsGrid.Columns.Add($column)
 }
-$main.Controls.Add($modsGrid, 0, 3)
+[void]$main.Controls.Add($modsGrid, 0, 3)
 
 $searchPanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $searchPanel.Dock = 'Fill'; $searchPanel.AutoSize = $true; $searchPanel.WrapContents = $false
@@ -180,7 +180,7 @@ $includeBox.Text = 'искать даже при наличии русского
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = 'Остановить'; $cancelButton.AutoSize = $true; $cancelButton.Enabled = $false
 $searchPanel.Controls.AddRange(@($selectAllButton, $clearButton, $searchCheckedButton, $searchAllButton, $includeBox, $cancelButton))
-$main.Controls.Add($searchPanel, 0, 4)
+[void]$main.Controls.Add($searchPanel, 0, 4)
 
 $resultsGrid = New-Object System.Windows.Forms.DataGridView
 $resultsGrid.Dock = 'Fill'; $resultsGrid.AllowUserToAddRows = $false; $resultsGrid.AllowUserToDeleteRows = $false
@@ -210,16 +210,16 @@ foreach ($definition in @(
     if ($definition[0] -ne 'Russifier') { $column.SortMode = 'Automatic' }
     [void]$resultsGrid.Columns.Add($column)
 }
-$main.Controls.Add($resultsGrid, 0, 5)
+[void]$main.Controls.Add($resultsGrid, 0, 5)
 
 $bottom = New-Object System.Windows.Forms.TableLayoutPanel
 $bottom.Dock = 'Fill'; $bottom.AutoSize = $true; $bottom.ColumnCount = 6
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 180)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 145)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 210)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
-$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 180)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 145)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 210)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
+[void]$bottom.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 100)))
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = 'Загрузите сборку или добавьте отдельный мод.'; $statusLabel.AutoSize = $true; $statusLabel.Anchor = 'Left'
 $progress = New-Object System.Windows.Forms.ProgressBar
@@ -232,10 +232,10 @@ $exportButton = New-Object System.Windows.Forms.Button
 $exportButton.Text = 'Экспорт...'; $exportButton.Dock = 'Fill'; $exportButton.Enabled = $false
 $openReportButton = New-Object System.Windows.Forms.Button
 $openReportButton.Text = 'Открыть отчёт'; $openReportButton.Dock = 'Fill'; $openReportButton.Enabled = $false
-$bottom.Controls.Add($statusLabel, 0, 0); $bottom.Controls.Add($progress, 1, 0)
-$bottom.Controls.Add($selectFoundButton, 2, 0); $bottom.Controls.Add($installButton, 3, 0)
-$bottom.Controls.Add($exportButton, 4, 0); $bottom.Controls.Add($openReportButton, 5, 0)
-$main.Controls.Add($bottom, 0, 6)
+[void]$bottom.Controls.Add($statusLabel, 0, 0); [void]$bottom.Controls.Add($progress, 1, 0)
+[void]$bottom.Controls.Add($selectFoundButton, 2, 0); [void]$bottom.Controls.Add($installButton, 3, 0)
+[void]$bottom.Controls.Add($exportButton, 4, 0); [void]$bottom.Controls.Add($openReportButton, 5, 0)
+[void]$main.Controls.Add($bottom, 0, 6)
 
 function Get-ModStateText {
     param($Mod)
