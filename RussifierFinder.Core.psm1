@@ -668,6 +668,7 @@ public static class RFSteamNative {
     [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern uint Workshop_GetNumSubscribedItems();
     [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern uint Workshop_GetItemState(ulong publishedFileId);
     [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern void Workshop_SubscribeItem(ulong publishedFileId);
+    [DllImport(@"$dllPath", CallingConvention = CallingConvention.Cdecl)] public static extern void Workshop_UnsubscribeItem(ulong publishedFileId);
 }
 "@
         Add-Type -TypeDefinition $source -Language CSharp
@@ -678,6 +679,109 @@ public static class RFSteamNative {
         2 { throw 'Steam не запущен.' }
         3 { throw 'Steam не подключён или пользователь не вошёл в аккаунт.' }
         default { throw "Не удалось инициализировать Steamworks (код $status)." }
+    }
+}
+
+function Remove-RFModFromActiveList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PackageId,
+        [string]$ConfigPath = (Get-RFDefaultConfigPath),
+        [switch]$KeepRimSortOpen
+    )
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Не найден ModsConfig.xml: $ConfigPath" }
+    if (@(Get-Process -Name 'RimWorldWin64', 'RimWorld' -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw 'Закройте RimWorld перед изменением ModsConfig.xml.'
+    }
+    if (-not $KeepRimSortOpen) {
+        foreach ($process in @(Get-Process -Name 'RimSort' -ErrorAction SilentlyContinue)) {
+            $null = $process.CloseMainWindow()
+            if (-not $process.WaitForExit(10000)) { throw 'Закройте RimSort и повторите операцию.' }
+        }
+    }
+    $raw = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+    [xml]$before = $raw
+    $normalized = $PackageId.Trim().ToLowerInvariant()
+    $activeBefore = @($before.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+    if ($activeBefore -notcontains $normalized) {
+        return [pscustomobject]@{ Removed = $false; PackageId = $PackageId; BackupPath = '' }
+    }
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+    $backupPath = Join-Path (Split-Path -Parent $ConfigPath) "ModsConfig.before-remove-mod.$timestamp.xml"
+    Copy-Item -LiteralPath $ConfigPath -Destination $backupPath -ErrorAction Stop
+    try {
+        $pattern = '(?im)^\s*<li>\s*' + [regex]::Escape($PackageId) + '\s*</li>\s*\r?\n?'
+        $updated = [regex]::Replace($raw, $pattern, '')
+        if ($updated -eq $raw) { throw "Не удалось найти $PackageId в activeMods." }
+        [IO.File]::WriteAllText($ConfigPath, $updated, [Text.UTF8Encoding]::new($false))
+        [xml]$verify = [IO.File]::ReadAllText($ConfigPath, [Text.UTF8Encoding]::new($false))
+        $activeAfter = @($verify.ModsConfigData.activeMods.li | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+        if ($activeAfter -contains $normalized) { throw 'Проверка удаления package ID не пройдена.' }
+    } catch {
+        Copy-Item -LiteralPath $backupPath -Destination $ConfigPath -Force
+        throw "Не удалось изменить ModsConfig.xml; резервная копия восстановлена. $($_.Exception.Message)"
+    }
+    [pscustomobject]@{ Removed = $true; PackageId = $PackageId; BackupPath = $backupPath }
+}
+
+function Uninstall-RFWorkshopMod {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkshopId,
+        [Parameter(Mandatory)][string]$PackageId,
+        [string]$ConfigPath = (Get-RFDefaultConfigPath),
+        [switch]$KeepRimSortOpen,
+        [scriptblock]$OnProgress
+    )
+    $id = ([regex]::Match($WorkshopId, '\d{6,}')).Value
+    if (-not $id) { throw 'Некорректный Workshop ID.' }
+    if (@(Get-Process -Name 'RimWorldWin64', 'RimWorld' -ErrorAction SilentlyContinue).Count -gt 0) {
+        throw 'Закройте RimWorld перед удалением мода.'
+    }
+    if (-not $KeepRimSortOpen) {
+        foreach ($process in @(Get-Process -Name 'RimSort' -ErrorAction SilentlyContinue)) {
+            $null = $process.CloseMainWindow()
+            if (-not $process.WaitForExit(10000)) { throw 'Закройте RimSort и повторите удаление.' }
+        }
+    }
+    $steamworksPath = Get-RFSteamworksPath
+    $oldCurrentDirectory = [Environment]::CurrentDirectory
+    $initialized = $false
+    $unsubscribed = $false
+    try {
+        [Environment]::CurrentDirectory = $steamworksPath
+        Initialize-RFSteamNative -SteamworksPath $steamworksPath
+        $initialized = $true
+        $state = [RFSteamNative]::Workshop_GetItemState([uint64]$id)
+        if (($state -band 1) -eq 0) {
+            $unsubscribed = $true
+        } else {
+            [RFSteamNative]::Workshop_UnsubscribeItem([uint64]$id)
+            $deadline = [DateTime]::UtcNow.AddSeconds(45)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                [RFSteamNative]::RunCallbacks()
+                $state = [RFSteamNative]::Workshop_GetItemState([uint64]$id)
+                if (($state -band 1) -eq 0) { $unsubscribed = $true; break }
+                if ($OnProgress) { & $OnProgress 'unsubscribe' 0 1 "Отписка: $id" }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+    } finally {
+        if ($initialized) { [RFSteamNative]::SteamShutdown() }
+        [Environment]::CurrentDirectory = $oldCurrentDirectory
+    }
+    $failed = @()
+    $removal = $null
+    if ($unsubscribed) {
+        $removal = Remove-RFModFromActiveList -PackageId $PackageId -ConfigPath $ConfigPath -KeepRimSortOpen:$KeepRimSortOpen
+    } else {
+        $failed = @([pscustomobject]@{ WorkshopId = $id; Reason = 'Steam не подтвердил отписку' })
+    }
+    [pscustomobject]@{
+        Kind = 'InstallResult'; Operation = 'uninstall'; WorkshopId = $id; PackageId = $PackageId
+        Unsubscribed = $unsubscribed; RemovedFromActive = [bool]($removal -and $removal.Removed)
+        Added = @(); AlreadyActive = @(); Failed = $failed
+        BackupPath = if ($removal) { $removal.BackupPath } else { '' }
     }
 }
 
@@ -862,5 +966,6 @@ function Export-RFReport {
 Export-ModuleMember -Function @(
     'Get-RFDefaultConfigPath', 'Get-RFWorkshopRoots', 'Get-RFModMetadata', 'Get-RFInstalledMods',
     'Get-RFActiveMods', 'Get-RFModByWorkshopId', 'ConvertFrom-RFWorkshopSearchHtml',
-    'Get-RFCandidateScore', 'Find-RFRussifiers', 'Install-RFTranslations', 'Export-RFReport'
+    'Get-RFCandidateScore', 'Find-RFRussifiers', 'Install-RFTranslations',
+    'Remove-RFModFromActiveList', 'Uninstall-RFWorkshopMod', 'Export-RFReport'
 )

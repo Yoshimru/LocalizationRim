@@ -35,11 +35,9 @@ function Write-HelperJson {
 try {
     $request = ([IO.File]::ReadAllText($RequestPath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json)
     Import-Module ([string]$request.ModulePath) -Force
-    $ids = if ($request.WorkshopIds -is [System.Array]) { [string[]]$request.WorkshopIds } else { @([string]$request.WorkshopIds) }
     $roots = if ($request.WorkshopRoots -is [System.Array]) { [string[]]$request.WorkshopRoots } else { @([string]$request.WorkshopRoots) }
     $keepRimSortOpen = $request.PSObject.Properties['KeepRimSortOpen'] -and [bool]$request.KeepRimSortOpen
-    $output = @(Install-RFTranslations -WorkshopIds $ids -ConfigPath ([string]$request.ConfigPath) -WorkshopRoots $roots `
-        -KeepRimSortOpen:$keepRimSortOpen -OnProgress {
+    $progressCallback = {
         param($stage, $done, $total, $name)
         # Progress is informational and must never abort subscriptions or a
         # config update if the UI happens to read the file at the same moment.
@@ -48,7 +46,17 @@ try {
                 Kind = 'Progress'; Stage = $stage; Done = $done; Total = $total; Name = $name
             })
         } catch {}
-    })
+    }
+    $operation = if ($request.PSObject.Properties['Operation']) { [string]$request.Operation } else { 'install' }
+    if ($operation -eq 'uninstall') {
+        $output = @(Uninstall-RFWorkshopMod -WorkshopId ([string]$request.WorkshopId) `
+            -PackageId ([string]$request.PackageId) -ConfigPath ([string]$request.ConfigPath) `
+            -KeepRimSortOpen:$keepRimSortOpen -OnProgress $progressCallback)
+    } else {
+        $ids = if ($request.WorkshopIds -is [System.Array]) { [string[]]$request.WorkshopIds } else { @([string]$request.WorkshopIds) }
+        $output = @(Install-RFTranslations -WorkshopIds $ids -ConfigPath ([string]$request.ConfigPath) -WorkshopRoots $roots `
+            -KeepRimSortOpen:$keepRimSortOpen -OnProgress $progressCallback)
+    }
     $report = @($output | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'InstallResult' } | Select-Object -Last 1)
     if ($report.Count -eq 0) { throw 'Не получен итоговый отчёт установки.' }
     Write-HelperJson -Path $ResultPath -Value ([pscustomobject]@{ Success = $true; Report = $report[0] })

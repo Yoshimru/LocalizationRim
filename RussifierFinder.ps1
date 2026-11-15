@@ -166,6 +166,19 @@ foreach ($definition in @(
 }
 [void]$main.Controls.Add($modsGrid, 0, 3)
 
+$modsContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$openWorkshopMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Открыть в Steam Workshop')
+$unsubscribeMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Удалить мод и отписаться')
+$deactivateMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Убрать из активного списка')
+$separatorMenuItem = New-Object System.Windows.Forms.ToolStripSeparator
+$copyNameMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Копировать название')
+$copyPackageMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Копировать package ID')
+[void]$modsContextMenu.Items.AddRange(@(
+    $openWorkshopMenuItem, $unsubscribeMenuItem, $deactivateMenuItem,
+    $separatorMenuItem, $copyNameMenuItem, $copyPackageMenuItem
+))
+$modsGrid.ContextMenuStrip = $modsContextMenu
+
 $searchPanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $searchPanel.Dock = 'Fill'; $searchPanel.AutoSize = $true; $searchPanel.WrapContents = $true
 $selectAllButton = New-Object System.Windows.Forms.Button
@@ -311,6 +324,20 @@ function Test-ModNeedsSearch {
 function Test-ModCanActivateTranslation {
     param($Mod)
     return $Mod.InstalledTranslation -and -not $Mod.InstalledTranslationActive -and $Mod.InstalledTranslationId
+}
+
+function Get-SelectedTopMod {
+    if ($modsGrid.SelectedRows.Count -eq 0) { return $null }
+    return $modsGrid.SelectedRows[0].Tag
+}
+
+function Set-RFClipboardText {
+    param([string]$Text)
+    try {
+        [Windows.Forms.Clipboard]::SetDataObject($Text, $true, 5, 100)
+    } catch {
+        [Windows.Forms.MessageBox]::Show('Не удалось скопировать текст в буфер обмена.', 'Буфер обмена', 'OK', 'Warning') | Out-Null
+    }
 }
 
 function Update-ModGrid {
@@ -513,9 +540,12 @@ function Get-SelectedTranslationCandidates {
 function Start-InstallJob {
     param(
         [string[]]$WorkshopIds = @(),
-        [switch]$ActivateExisting
+        [switch]$ActivateExisting,
+        [switch]$Uninstall,
+        [string]$PackageId = '',
+        [string]$ModName = ''
     )
-    if ($WorkshopIds.Count -eq 0) {
+    if (-not $Uninstall -and $WorkshopIds.Count -eq 0) {
         $candidates = @(Get-SelectedTranslationCandidates)
         if ($candidates.Count -eq 0) {
             [Windows.Forms.MessageBox]::Show('Отметьте найденные русификаторы в колонке «Уст.».', 'Установка', 'OK', 'Information')
@@ -524,12 +554,17 @@ function Start-InstallJob {
         $WorkshopIds = @($candidates.WorkshopId)
     }
     $WorkshopIds = @($WorkshopIds | Where-Object { $_ } | Select-Object -Unique)
-    if ($ActivateExisting) {
+    if ($Uninstall) {
+        if ($WorkshopIds.Count -ne 1 -or -not $PackageId) { throw 'Для удаления требуется один Workshop ID и package ID.' }
+        $displayName = if ($ModName) { $ModName } else { $PackageId }
+        $message = "Мод «$displayName» будет удалён из активного списка и будет выполнена отписка в Steam Workshop.`r`n`r`nПапку мода Steam удалит автоматически. Перед изменением ModsConfig.xml создаётся резервная копия.`r`n`r`nПродолжить?"
+    } elseif ($ActivateExisting) {
         $message = "Будет активировано уже скачанных русификаторов: $($WorkshopIds.Count).`r`n`r`nОни будут добавлены в ModsConfig.xml. Перед изменением создаётся резервная копия. RimWorld должен быть закрыт.`r`n`r`nПродолжить?"
     } else {
         $message = "Будет оформлена подписка на $($WorkshopIds.Count) русификаторов.`r`n`r`nПосле загрузки они будут добавлены в ModsConfig.xml. Перед изменением создаётся резервная копия. RimWorld должен быть закрыт; открытый RimSort будет закрыт автоматически.`r`n`r`nПродолжить?"
     }
-    if ([Windows.Forms.MessageBox]::Show($message, 'Подписка и добавление', 'YesNo', 'Question') -ne 'Yes') { return }
+    $confirmationTitle = if ($Uninstall) { 'Удаление мода' } elseif ($ActivateExisting) { 'Активация переводов' } else { 'Подписка и добавление' }
+    if ([Windows.Forms.MessageBox]::Show($message, $confirmationTitle, 'YesNo', 'Question') -ne 'Yes') { return }
     $operationId = [guid]::NewGuid().ToString('N')
     $requestPath = Join-Path $env:TEMP "rf-install-$operationId-request.json"
     $resultPath = Join-Path $env:TEMP "rf-install-$operationId-result.json"
@@ -539,14 +574,17 @@ function Start-InstallJob {
     $helperPath = Join-Path $PSScriptRoot 'InstallTranslations.Helper.ps1'
     $request = [pscustomobject]@{
         ModulePath = $modulePath
+        Operation = if ($Uninstall) { 'uninstall' } else { 'install' }
         WorkshopIds = @($WorkshopIds)
+        WorkshopId = if ($Uninstall) { [string]$WorkshopIds[0] } else { '' }
+        PackageId = $PackageId
         ConfigPath = $configRow.TextBox.Text
         WorkshopRoots = @($workshopRow.TextBox.Text)
         KeepRimSortOpen = $false
     }
     [IO.File]::WriteAllText($requestPath, ($request | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
     $script:jobItems.Clear(); $script:jobMode = 'install'
-    $script:installAction = if ($ActivateExisting) { 'activate' } else { 'install' }
+    $script:installAction = if ($Uninstall) { 'uninstall' } elseif ($ActivateExisting) { 'activate' } else { 'install' }
     $script:currentJob = Start-Job -ScriptBlock {
         param($helper, $requestFile, $resultFile, $progressFile, $stdoutFile, $stderrFile)
         function Read-SharedUtf8File {
@@ -603,7 +641,7 @@ function Start-InstallJob {
             Remove-Item $requestFile, $resultFile, $progressFile, $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
         }
     } -ArgumentList $helperPath, $requestPath, $resultPath, $progressPath, $stdoutPath, $stderrPath
-    $operationText = if ($ActivateExisting) { 'Активация' } else { 'Установка' }
+    $operationText = if ($Uninstall) { 'Удаление' } elseif ($ActivateExisting) { 'Активация' } else { 'Установка' }
     Set-BusyState $true "$operationText $($WorkshopIds.Count) русификаторов..."
     $cancelButton.Enabled = $false
     $progress.Style = 'Blocks'; $progress.Minimum = 0; $progress.Maximum = [Math]::Max(1, $WorkshopIds.Count); $progress.Value = 0
@@ -658,8 +696,12 @@ $timer.Add_Tick({
                 [Windows.Forms.MessageBox]::Show('Steam не вернул отчёт об установке.', 'Установка', 'OK', 'Error')
             } else {
                 $item = $report[0]
-                $summaryTitle = if ($script:installAction -eq 'activate') { 'Активация завершена.' } else { 'Подписка завершена.' }
-                $summary = "$summaryTitle`r`n`r`nДобавлено в список модов: $(@($item.Added).Count)`r`nУже были активны: $(@($item.AlreadyActive).Count)`r`nНе удалось установить: $(@($item.Failed).Count)"
+                if ($script:installAction -eq 'uninstall') {
+                    $summary = "Удаление завершено.`r`n`r`nОтписка в Steam: $(if ($item.Unsubscribed) { 'выполнена' } else { 'не подтверждена' })`r`nУдалён из активного списка: $(if ($item.RemovedFromActive) { 'да' } else { 'нет' })`r`nОшибки: $(@($item.Failed).Count)"
+                } else {
+                    $summaryTitle = if ($script:installAction -eq 'activate') { 'Активация завершена.' } else { 'Подписка завершена.' }
+                    $summary = "$summaryTitle`r`n`r`nДобавлено в список модов: $(@($item.Added).Count)`r`nУже были активны: $(@($item.AlreadyActive).Count)`r`nНе удалось установить: $(@($item.Failed).Count)"
+                }
                 if ($item.BackupPath) { $summary += "`r`n`r`nРезервная копия:`r`n$($item.BackupPath)" }
                 $icon = if (@($item.Failed).Count -gt 0) { 'Warning' } else { 'Information' }
                 [Windows.Forms.MessageBox]::Show($summary, 'Установка русификаторов', 'OK', $icon)
@@ -691,6 +733,66 @@ $addButton.Add_Click({
         if ($existing.Count -eq 0) { $script:mods += $mod }
         $idBox.Clear(); Update-ModGrid
     } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Не удалось добавить мод', 'OK', 'Error') }
+})
+$modsGrid.Add_CellMouseDown({
+    param($sender, $eventArgs)
+    if ($eventArgs.Button -eq [Windows.Forms.MouseButtons]::Right -and $eventArgs.RowIndex -ge 0) {
+        $modsGrid.ClearSelection()
+        $modsGrid.Rows[$eventArgs.RowIndex].Selected = $true
+        $modsGrid.CurrentCell = $modsGrid.Rows[$eventArgs.RowIndex].Cells['Name']
+    }
+})
+$modsGrid.Add_CellDoubleClick({
+    param($sender, $eventArgs)
+    if ($eventArgs.RowIndex -lt 0) { return }
+    $mod = $modsGrid.Rows[$eventArgs.RowIndex].Tag
+    if ($mod -and $mod.SteamUrl) { Start-Process ([string]$mod.SteamUrl) }
+})
+$modsContextMenu.Add_Opening({
+    param($sender, $eventArgs)
+    $mod = Get-SelectedTopMod
+    if (-not $mod) { $eventArgs.Cancel = $true; return }
+    $openWorkshopMenuItem.Enabled = [bool]$mod.SteamUrl
+    $unsubscribeMenuItem.Enabled = -not $script:currentJob -and [bool]$mod.WorkshopId
+    $deactivateMenuItem.Enabled = -not $script:currentJob -and [bool]$mod.PackageId
+    $copyNameMenuItem.Enabled = [bool]$mod.Name
+    $copyPackageMenuItem.Enabled = [bool]$mod.PackageId
+})
+$openWorkshopMenuItem.Add_Click({
+    $mod = Get-SelectedTopMod
+    if ($mod -and $mod.SteamUrl) { Start-Process ([string]$mod.SteamUrl) }
+})
+$copyNameMenuItem.Add_Click({
+    $mod = Get-SelectedTopMod
+    if ($mod -and $mod.Name) { Set-RFClipboardText ([string]$mod.Name) }
+})
+$copyPackageMenuItem.Add_Click({
+    $mod = Get-SelectedTopMod
+    if ($mod -and $mod.PackageId) { Set-RFClipboardText ([string]$mod.PackageId) }
+})
+$deactivateMenuItem.Add_Click({
+    $mod = Get-SelectedTopMod
+    if (-not $mod) { return }
+    $message = "Убрать «$($mod.Name)» из активного списка?`r`n`r`nПодписка и файлы Workshop останутся. Перед изменением будет создана резервная копия."
+    if ([Windows.Forms.MessageBox]::Show($message, 'Изменение списка модов', 'YesNo', 'Question') -ne 'Yes') { return }
+    try {
+        $report = Remove-RFModFromActiveList -PackageId ([string]$mod.PackageId) -ConfigPath $configRow.TextBox.Text
+        $text = if ($report.Removed) { "Мод удалён из активного списка.`r`n`r`nРезервная копия:`r`n$($report.BackupPath)" } else { 'Мод уже отсутствует в активном списке.' }
+        [Windows.Forms.MessageBox]::Show($text, 'Список модов', 'OK', 'Information') | Out-Null
+        Start-LoadJob
+    } catch {
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Не удалось изменить список', 'OK', 'Error') | Out-Null
+    }
+})
+$unsubscribeMenuItem.Add_Click({
+    $mod = Get-SelectedTopMod
+    if (-not $mod -or -not $mod.WorkshopId) { return }
+    try {
+        Start-InstallJob -WorkshopIds @([string]$mod.WorkshopId) -Uninstall `
+            -PackageId ([string]$mod.PackageId) -ModName ([string]$mod.Name)
+    } catch {
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Не удалось начать удаление', 'OK', 'Error') | Out-Null
+    }
 })
 $filterBox.Add_TextChanged({ Update-ModGrid })
 $categoryBox.Add_SelectedIndexChanged({ Update-ModGrid })
