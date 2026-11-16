@@ -422,6 +422,29 @@ function ConvertFrom-RFHtmlText {
     return [regex]::Replace([System.Net.WebUtility]::HtmlDecode($withoutTags), '\s+', ' ').Trim()
 }
 
+function ConvertFrom-RFWorkshopRequiredItemsHtml {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Html)
+    $container = [regex]::Match(
+        $Html,
+        '<div[^>]*\bid=["'']RequiredItems["''][^>]*>(.*?)</div>\s*</div>\s*<!--\s*created by\s*-->',
+        [Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if (-not $container.Success) { return @() }
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($match in [regex]::Matches(
+        $container.Groups[1].Value,
+        '<a[^>]+href=["''][^"'']*filedetails/\?id=(\d{6,})[^"'']*["''][^>]*>(.*?)</a>',
+        [Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )) {
+        $items.Add([pscustomobject]@{
+            WorkshopId = $match.Groups[1].Value
+            Title = ConvertFrom-RFHtmlText $match.Groups[2].Value
+        })
+    }
+    return $items.ToArray()
+}
+
 function Add-RFJsonResults {
     param(
         $Node,
@@ -492,6 +515,21 @@ function Get-RFNormalizedText {
     return [regex]::Replace($value, '\s+', ' ').Trim()
 }
 
+function ConvertTo-RFWorkshopCandidate {
+    param($RawCandidate, $Detail)
+    if ($Detail) {
+        return [pscustomobject]@{
+            WorkshopId = [string]$Detail.publishedfileid
+            Title = ConvertFrom-RFHtmlText ([string]$Detail.title)
+            Description = ConvertFrom-RFHtmlText ([string]$Detail.description)
+            Tags = @($Detail.tags | ForEach-Object { [string]$_.tag })
+            Updated = [long]$Detail.time_updated
+            Url = "https://steamcommunity.com/sharedfiles/filedetails/?id=$($Detail.publishedfileid)"
+        }
+    }
+    return $RawCandidate
+}
+
 function Get-RFCandidateScore {
     param($Source, $Candidate)
     $sourceName = Get-RFNormalizedText $Source.Name
@@ -510,6 +548,38 @@ function Get-RFCandidateScore {
     }
     if ($Source.PackageId -and $Candidate.Description -match [regex]::Escape($Source.PackageId)) {
         $score += 100; $reasons.Add('packageId оригинала')
+    }
+    $requiredItemsProperty = $Candidate.PSObject.Properties['RequiredItems']
+    $requiredItemsCheckFailed = $Candidate.PSObject.Properties['RequiredItemsCheckFailed']
+    $hasDirectSourceReference =
+        ($Source.WorkshopId -and $Candidate.Description -match [regex]::Escape([string]$Source.WorkshopId)) -or
+        ($Source.PackageId -and $Candidate.Description -match [regex]::Escape([string]$Source.PackageId))
+    if ($Source.WorkshopId -and $requiredItemsCheckFailed -and [bool]$requiredItemsCheckFailed.Value -and -not $hasDirectSourceReference) {
+        # Do not fall back to a title-only match when Steam did not return the
+        # dependency page. Same-named forks make that fallback unsafe.
+        $score -= 500
+        $reasons.Add('не удалось проверить зависимости')
+    }
+    if ($Source.WorkshopId -and $requiredItemsProperty) {
+        $requiredItems = @($requiredItemsProperty.Value)
+        $sourceWorkshopId = [string]$Source.WorkshopId
+        $requiredIds = @($requiredItems | ForEach-Object { [string]$_.WorkshopId })
+        if ($requiredIds -contains $sourceWorkshopId) {
+            $score += 180; $reasons.Add('зависимость от оригинала')
+        } elseif ($requiredItems.Count -gt 0 -and $sourceName) {
+            # If a translation explicitly depends on a different Workshop item
+            # with the same normalized title, the dependency is authoritative.
+            # This distinguishes same-named forks such as the EoralMilk and RH
+            # versions of Ratkin Gene Expanded.
+            $conflictingOriginal = @($requiredItems | Where-Object {
+                $_.WorkshopId -and [string]$_.WorkshopId -ne $sourceWorkshopId -and
+                (Get-RFNormalizedText $_.Title) -eq $sourceName
+            } | Select-Object -First 1)
+            if ($conflictingOriginal.Count -gt 0) {
+                $score -= 500
+                $reasons.Add("зависит от другого оригинала: $($conflictingOriginal[0].Title) [$($conflictingOriginal[0].WorkshopId)]")
+            }
+        }
     }
     $sourceNameTokens = @($sourceName -split ' ' | Where-Object { $_ })
     if ($sourceName -and $title -eq $sourceName) { $score += 150; $reasons.Add('точное название') }
@@ -642,21 +712,78 @@ function Find-RFRussifiers {
         } catch {}
     }
 
+    # Steam's legacy details API does not include required Workshop items.
+    # Load item pages only for plausible matches, in parallel, and use their
+    # Required items blocks to disambiguate same-named originals and forks.
+    $dependencyCandidateIds = New-Object 'System.Collections.Generic.HashSet[string]'
+    # Verify only candidates that would otherwise be shown. Using a lower
+    # pre-filter causes hundreds of detail-page requests during collection-wide
+    # searches and Steam starts rejecting them.
+    $dependencyCheckScore = $MinimumScore
+    foreach ($sourceKey in @($rawBySource.Keys)) {
+        $record = $resultMap[$sourceKey]
+        if (-not $record.Mod.WorkshopId) { continue }
+        foreach ($rawCandidate in @($rawBySource[$sourceKey])) {
+            $candidate = ConvertTo-RFWorkshopCandidate -RawCandidate $rawCandidate -Detail $detailsById[$rawCandidate.WorkshopId]
+            $initialRating = Get-RFCandidateScore -Source $record.Mod -Candidate $candidate
+            if ($initialRating.MatchScore -ge $dependencyCheckScore) {
+                [void]$dependencyCandidateIds.Add([string]$candidate.WorkshopId)
+            }
+        }
+    }
+    $requiredItemsById = @{}
+    $failedRequiredItemsIds = New-Object 'System.Collections.Generic.HashSet[string]'
+    if ($dependencyCandidateIds.Count -gt 0) {
+        $dependencyClient = New-RFHttpClient
+        $dependencyPending = New-Object System.Collections.Queue
+        foreach ($candidateId in $dependencyCandidateIds) { $dependencyPending.Enqueue($candidateId) }
+        $dependencyRunning = New-Object System.Collections.Generic.List[object]
+        $dependencyConcurrency = [Math]::Min(3, $Concurrency)
+        try {
+            while ($dependencyPending.Count -gt 0 -or $dependencyRunning.Count -gt 0) {
+                while ($dependencyPending.Count -gt 0 -and $dependencyRunning.Count -lt $dependencyConcurrency) {
+                    $candidateId = [string]$dependencyPending.Dequeue()
+                    $url = "https://steamcommunity.com/sharedfiles/filedetails/?id=$candidateId&l=english"
+                    $dependencyRunning.Add([pscustomobject]@{ WorkshopId=$candidateId; Task=$dependencyClient.GetStringAsync($url) })
+                }
+                $tasks = [System.Threading.Tasks.Task[]]@($dependencyRunning | ForEach-Object { $_.Task })
+                $finishedIndex = [System.Threading.Tasks.Task]::WaitAny($tasks)
+                $entry = $dependencyRunning[$finishedIndex]
+                $dependencyRunning.RemoveAt($finishedIndex)
+                try {
+                    $html = $entry.Task.GetAwaiter().GetResult()
+                    $requiredItemsById[$entry.WorkshopId] = @(ConvertFrom-RFWorkshopRequiredItemsHtml -Html $html)
+                } catch {
+                    [void]$failedRequiredItemsIds.Add([string]$entry.WorkshopId)
+                }
+            }
+            # Retry failed pages once after the initial parallel batch. If the
+            # retry also fails, final scoring marks the candidate unverified
+            # instead of silently accepting a title-only match.
+            foreach ($candidateId in @($failedRequiredItemsIds)) {
+                try {
+                    $url = "https://steamcommunity.com/sharedfiles/filedetails/?id=$candidateId&l=english"
+                    $html = $dependencyClient.GetStringAsync($url).GetAwaiter().GetResult()
+                    $requiredItemsById[$candidateId] = @(ConvertFrom-RFWorkshopRequiredItemsHtml -Html $html)
+                    [void]$failedRequiredItemsIds.Remove($candidateId)
+                } catch {}
+            }
+        } finally {
+            $dependencyClient.Dispose()
+        }
+    }
+
     foreach ($sourceKey in @($rawBySource.Keys)) {
         $record = $resultMap[$sourceKey]
         $scored = New-Object System.Collections.Generic.List[object]
         foreach ($rawCandidate in @($rawBySource[$sourceKey])) {
             $detail = $detailsById[$rawCandidate.WorkshopId]
-            $candidate = if ($detail) {
-                [pscustomobject]@{
-                    WorkshopId = [string]$detail.publishedfileid
-                    Title = ConvertFrom-RFHtmlText ([string]$detail.title)
-                    Description = ConvertFrom-RFHtmlText ([string]$detail.description)
-                    Tags = @($detail.tags | ForEach-Object { [string]$_.tag })
-                    Updated = [long]$detail.time_updated
-                    Url = "https://steamcommunity.com/sharedfiles/filedetails/?id=$($detail.publishedfileid)"
-                }
-            } else { $rawCandidate }
+            $candidate = ConvertTo-RFWorkshopCandidate -RawCandidate $rawCandidate -Detail $detail
+            if ($requiredItemsById.ContainsKey([string]$candidate.WorkshopId)) {
+                $candidate | Add-Member -NotePropertyName RequiredItems -NotePropertyValue @($requiredItemsById[[string]$candidate.WorkshopId])
+            } elseif ($failedRequiredItemsIds.Contains([string]$candidate.WorkshopId)) {
+                $candidate | Add-Member -NotePropertyName RequiredItemsCheckFailed -NotePropertyValue $true
+            }
             $rating = Get-RFCandidateScore -Source $record.Mod -Candidate $candidate
             if ($rating.MatchScore -ge $MinimumScore) {
                 $scored.Add([pscustomobject]@{
@@ -1051,7 +1178,7 @@ function Export-RFReport {
 
 Export-ModuleMember -Function @(
     'Get-RFDefaultConfigPath', 'Get-RFWorkshopRoots', 'Get-RFModMetadata', 'Get-RFInstalledMods',
-    'Get-RFActiveMods', 'Get-RFModByWorkshopId', 'ConvertFrom-RFWorkshopSearchHtml',
+    'Get-RFActiveMods', 'Get-RFModByWorkshopId', 'ConvertFrom-RFWorkshopSearchHtml', 'ConvertFrom-RFWorkshopRequiredItemsHtml',
     'Get-RFCandidateScore', 'Find-RFRussifiers', 'Install-RFTranslations',
     'Add-RFPackageToActiveList', 'Remove-RFModFromActiveList',
     'Uninstall-RFWorkshopMod', 'Export-RFReport'
