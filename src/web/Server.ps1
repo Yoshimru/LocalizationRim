@@ -7,6 +7,22 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 try{[Diagnostics.Process]::GetCurrentProcess().PriorityClass='AboveNormal'}catch{}
+try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public static class RFPowerThrottling {
+    [StructLayout(LayoutKind.Sequential)] public struct State { public uint Version; public uint ControlMask; public uint StateMask; }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetProcessInformation(IntPtr hProcess, int infoClass, ref State state, int size);
+    public static void Disable() {
+        var state = new State { Version = 1, ControlMask = 1, StateMask = 0 };
+        SetProcessInformation(Process.GetCurrentProcess().Handle, 4, ref state, Marshal.SizeOf(typeof(State)));
+    }
+}
+'@
+    [RFPowerThrottling]::Disable()
+} catch {}
 $srcRoot = Split-Path -Parent $PSScriptRoot
 $corePath = Join-Path $srcRoot 'modules\RussifierFinder.Core.psm1'
 $machinePath = Join-Path $srcRoot 'modules\MachineTranslation.psm1'
@@ -102,7 +118,6 @@ function Write-Event($context, $value) {
     $json = ($value | ConvertTo-Json -Depth 12 -Compress) + "`n"
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
     $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    $context.Response.OutputStream.Flush()
 }
 
 function Close-EventStream($context) {
@@ -164,7 +179,7 @@ try {
                     $includeExisting=$body.PSObject.Properties['includeExisting'] -and [bool]$body.includeExisting
                     Write-Event $context @{type='progress';percent=2;title='Поиск переводов';step="Подготовлено модов: $($targets.Count)"}
                     $script:results=@(Find-RFRussifiers -Mods $targets -Concurrency 6 -MaxCandidates 5 -IncludeWithRussian:$includeExisting -OnProgress {
-                        param($done,$total,$name);$percent=if($total){5+[Math]::Floor(78*$done/$total)}else{50};Write-Event $context @{type='progress';percent=$percent;title='Запросы Steam Workshop';step="$done из $total — $name"}
+                        param($done,$total,$name);if($done-eq1-or$done-eq$total-or$done%5-eq0){$percent=if($total){5+[Math]::Floor(78*$done/$total)}else{50};Write-Event $context @{type='progress';percent=$percent;title='Запросы Steam Workshop';step="$done из $total — $name"}}
                     })
                     Write-Event $context @{type='progress';percent=92;title='Проверка кандидатов';step='Оценка совпадений, версий и package ID'}
                     Write-Event $context @{type='progress';percent=97;title='Подготовка результатов';step="Найдено строк: $($script:results.Count)"}
@@ -228,6 +243,12 @@ try {
             if ($path -eq '/api/settings' -and $request.HttpMethod -eq 'POST') {
                 $b=Read-Body $request;$s=Get-RFMachineSettings $ProjectRoot;$s.Provider=[string]$b.provider;$s.BaseUrl=[string]$b.baseUrl;$s.Model=[string]$b.model;$s.MaxConcurrency=[int]$b.maxConcurrency;$s.RequestTimeoutSeconds=[int]$b.requestTimeoutSeconds;$s.CustomPrompt=[string]$b.customPrompt
                 Save-RFMachineSettings -ProjectRoot $ProjectRoot -Settings $s -PlainApiKey ([string]$b.apiKey)|Out-Null;Send-Json $context @{ok=$true};continue
+            }
+            if ($path -eq '/api/settings/test' -and $request.HttpMethod -eq 'POST') {
+                $b=Read-Body $request;$s=Get-RFMachineSettings $ProjectRoot
+                if($b.PSObject.Properties['provider']){$s.Provider=[string]$b.provider};if($b.PSObject.Properties['baseUrl']){$s.BaseUrl=[string]$b.baseUrl};if($b.PSObject.Properties['model']){$s.Model=[string]$b.model};if($b.PSObject.Properties['requestTimeoutSeconds']){$s.RequestTimeoutSeconds=[int]$b.requestTimeoutSeconds};if($b.PSObject.Properties['customPrompt']){$s.CustomPrompt=[string]$b.customPrompt}
+                $plainKey=if($b.PSObject.Properties['apiKey']){[string]$b.apiKey}else{''};$test=Test-RFMachineTranslationProvider -Settings $s -PlainApiKey $plainKey -ProjectRoot $ProjectRoot
+                Send-Json $context @{ok=$true;test=$test};continue
             }
             if ($path -eq '/api/remove-active' -and $request.HttpMethod -eq 'POST') {$b=Read-Body $request;$r=Remove-RFModFromActiveList -PackageId ([string]$b.packageId) -ConfigPath $script:configPath;$script:mods=@(Get-RFActiveMods -ConfigPath $script:configPath -WorkshopRoots @($script:workshopRoot));Send-Json $context @{ok=$true;report=$r;state=(Get-StateDto)};continue}
             if ($path -eq '/api/unsubscribe' -and $request.HttpMethod -eq 'POST') {$b=Read-Body $request;$r=Uninstall-RFWorkshopMod -WorkshopId ([string]$b.workshopId) -PackageId ([string]$b.packageId) -ConfigPath $script:configPath;$script:mods=@(Get-RFActiveMods -ConfigPath $script:configPath -WorkshopRoots @($script:workshopRoot));Send-Json $context @{ok=$true;report=$r;state=(Get-StateDto)};continue}

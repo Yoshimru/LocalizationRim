@@ -229,3 +229,29 @@ tbody tr:hover {
   box-shadow: 0 0 18px rgba(85, 181, 255, 0.55);
   transition: width 0.45s ease;
 }
+
+.api-test-result {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(66, 190, 121, 0.55);
+  border-radius: 8px;
+  background: rgba(43, 144, 88, 0.14);
+  color: #a9efc7;
+  word-break: break-word;
+}
+
+.api-test-result.error {
+  border-color: rgba(238, 76, 91, 0.58);
+  background: rgba(238, 76, 91, 0.12);
+  color: #ffadb5;
+}
+
+.provider-hint {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #7aaeff;
+  border-radius: 7px;
+  background: rgba(72, 126, 205, 0.13);
+  color: #b9d4fa;
+  line-height: 1.45;
+}

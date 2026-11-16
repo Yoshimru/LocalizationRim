@@ -9,7 +9,7 @@ function Get-RFMachineSettingsDefaults {
         ApiKeyProtected = ''
         MaxConcurrency = 5
         RequestTimeoutSeconds = 60
-        CustomPrompt = 'Translate RimWorld mod text into natural Russian. Preserve XML tags, placeholders, formatting tokens, proper names and line breaks. Return only the translation.'
+        CustomPrompt = 'You are a professional Russian localization editor for RimWorld mods. Translate the provided source text into fluent, concise Russian that fits RimWorld terminology and tone. Preserve XML/HTML/BBCode tags, def names, keys, URLs, escaped sequences, line breaks, numbers and placeholders such as {0}, {1}, %s, %d, [PAWN_nameDef], <color>, \n and similar tokens exactly. Keep proper names consistent across strings. Do not translate code identifiers. Do not add explanations, notes, quotation marks or Markdown fences. Return only the translated text.'
     }
 }
 
@@ -26,7 +26,67 @@ function Get-RFMachineSettings {
             $stored | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
         }
     }
+    $legacyPrompt = 'Translate RimWorld mod text into natural Russian. Preserve XML tags, placeholders, formatting tokens, proper names and line breaks. Return only the translation.'
+    if ([string]$stored.CustomPrompt -eq $legacyPrompt) { $stored.CustomPrompt = $defaults.CustomPrompt }
     return $stored
+}
+
+function Test-RFMachineTranslationProvider {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Settings,
+        [string]$PlainApiKey = '',
+        [string]$ProjectRoot = ''
+    )
+    Add-Type -AssemblyName System.Net.Http
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $provider = [string]$Settings.Provider
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    if ($provider -eq 'Google') {
+        $url = 'https://translate.google.com/translate_a/single?client=gtx&sl=en&tl=ru&dt=t&ie=UTF-8&oe=UTF-8&q=' + [uri]::EscapeDataString('Hello, colonist!')
+        $client = New-Object Net.Http.HttpClient
+        try {
+            $client.Timeout = [TimeSpan]::FromSeconds([int]$Settings.RequestTimeoutSeconds)
+            $raw = $client.GetStringAsync($url).GetAwaiter().GetResult()
+            $json = $raw | ConvertFrom-Json
+            $translated = (@($json[0] | ForEach-Object { [string]$_[0] }) -join '')
+        } finally { $client.Dispose() }
+    } elseif ($provider -eq 'Yandex') {
+        $url = 'https://browser.translate.yandex.net/api/v1/tr.json/translate?lang=ru&text=' + [uri]::EscapeDataString('Hello, colonist!') + '&srv=browser_video_translation'
+        $client = New-Object Net.Http.HttpClient
+        try {
+            $client.Timeout = [TimeSpan]::FromSeconds([int]$Settings.RequestTimeoutSeconds)
+            $content = New-Object Net.Http.StringContent('')
+            $raw = $client.PostAsync($url, $content).GetAwaiter().GetResult().Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            $json = $raw | ConvertFrom-Json
+            $translated = [string]$json.text[0]
+        } finally { $client.Dispose() }
+    } elseif ($provider -eq 'AgentRouter') {
+        if (-not $Settings.Model) { throw 'Не указана модель AgentRouter.' }
+        if (-not $ProjectRoot) { throw 'Не указан путь LocalizationRim для AgentRouter CLI bridge.' }
+        $bridge = Join-Path $ProjectRoot 'bin\AgentRouterBridge.exe'
+        if (-not (Test-Path -LiteralPath $bridge)) { throw 'Не найден bin\AgentRouterBridge.exe.' }
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $bridge
+        $psi.Arguments = '--model "' + ([string]$Settings.Model).Replace('"','') + '"'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+        $process = [Diagnostics.Process]::Start($psi)
+        try {
+            $process.StandardInput.Write(([string]$Settings.CustomPrompt) + "`n`nTranslate into Russian and return only the translation: Hello, colonist!")
+            $process.StandardInput.Close()
+            $raw = $process.StandardOutput.ReadToEnd(); $stderr = $process.StandardError.ReadToEnd()
+            if (-not $process.WaitForExit([int]$Settings.RequestTimeoutSeconds * 1000)) { try{$process.Kill()}catch{}; throw 'OpenCode CLI превысил тайм-аут.' }
+            if ($process.ExitCode -ne 0) { throw $(if($stderr){$stderr}else{$raw}) }
+            $json = $raw | ConvertFrom-Json
+            if ($json.is_error) { throw [string]$json.result }
+            $translated = [string]$json.result
+        } finally { $process.Dispose() }
+    } else { throw "Неизвестный провайдер: $provider" }
+    $watch.Stop()
+    if (-not $translated) { throw 'Провайдер вернул пустой ответ.' }
+    [pscustomobject]@{ Provider=$provider; Success=$true; LatencyMs=$watch.ElapsedMilliseconds; Response=$translated.Trim() }
 }
 
 function Protect-RFMachineApiKey {
@@ -112,6 +172,23 @@ function Set-RFAutoTranslationAiSettings {
     Set-RFXmlChildValue $Document $valueNode 'RequestTimeoutSeconds' ([string]$Settings.RequestTimeoutSeconds) | Out-Null
 }
 
+function Set-RFAutoTranslationCliSettings {
+    param([xml]$Document, $Root, $Settings, [string]$CliPath)
+    $dictionary = $Root.SelectSingleNode('TranslatorSettings')
+    if (-not $dictionary) { $dictionary=$Document.CreateElement('TranslatorSettings');[void]$Root.AppendChild($dictionary) }
+    $keys=$dictionary.SelectSingleNode('keys');if(-not$keys){$keys=$Document.CreateElement('keys');[void]$dictionary.AppendChild($keys)}
+    $values=$dictionary.SelectSingleNode('values');if(-not$values){$values=$Document.CreateElement('values');[void]$dictionary.AppendChild($values)}
+    $keyNodes=@($keys.SelectNodes('li'));$valueNodes=@($values.SelectNodes('li'));$index=-1
+    for($i=0;$i-lt$keyNodes.Count;$i++){if([string]$keyNodes[$i].InnerText-eq'Claude Code (CLI)'){$index=$i;break}}
+    if($index-lt0){$keyNode=$Document.CreateElement('li');$keyNode.InnerText='Claude Code (CLI)';[void]$keys.AppendChild($keyNode);$valueNode=$Document.CreateElement('li');$class=$Document.CreateAttribute('Class');$class.Value='AutoTranslation.Translators.TranslatorSettings_AIModel';[void]$valueNode.Attributes.Append($class);[void]$values.AppendChild($valueNode)}else{$valueNode=$valueNodes[$index]}
+    Set-RFXmlChildValue $Document $valueNode 'UserSelectedModel' ([string]$Settings.Model)|Out-Null
+    Set-RFXmlChildValue $Document $valueNode 'UserCustomPrompt' ([string]$Settings.CustomPrompt)|Out-Null
+    Set-RFXmlChildValue $Document $valueNode 'CliPath' $CliPath|Out-Null
+    Set-RFXmlChildValue $Document $valueNode 'EnableBatchTranslation' 'True'|Out-Null
+    Set-RFXmlChildValue $Document $valueNode 'BatchSizeTokens' '2000'|Out-Null
+    Set-RFXmlChildValue $Document $valueNode 'RequestTimeoutSeconds' ([string]$Settings.RequestTimeoutSeconds)|Out-Null
+}
+
 function Get-RFRimWorldInstallPath {
     param([string[]]$WorkshopRoots)
     foreach ($root in $WorkshopRoots) {
@@ -187,7 +264,7 @@ function Enable-RFMachineTranslation {
     $settingsPath = Join-Path (Split-Path -Parent $ConfigPath) "Mod_$($engine[0].WorkshopId)_AutoTranslation.xml"
     $document = Get-RFAutoTranslationSettingsDocument $settingsPath
     $root = $document.SelectSingleNode('/SettingsBlock/ModSettings')
-    Set-RFXmlChildValue $document $root 'AutoTranslation_TranslatorName' $(if ($Settings.Provider -eq 'AgentRouter') { 'OpenAI Compatible (Local/Other)' } else { [string]$Settings.Provider }) | Out-Null
+    Set-RFXmlChildValue $document $root 'AutoTranslation_TranslatorName' $(if ($Settings.Provider -eq 'AgentRouter') { 'Claude Code (CLI)' } else { [string]$Settings.Provider }) | Out-Null
     Set-RFXmlChildValue $document $root 'AutoTranslation_EnableAutoTranslation' 'True' | Out-Null
     Set-RFXmlChildValue $document $root 'AutoTranslation_AutoTranslateNewMods' 'False' | Out-Null
     Set-RFXmlChildValue $document $root 'AutoTranslation_TargetLanguageOverride' 'Russian' | Out-Null
@@ -199,10 +276,10 @@ function Enable-RFMachineTranslation {
         $node = $document.CreateElement('li'); $node.InnerText = $id; [void]$blackList.AppendChild($node)
     }
     if ($Settings.Provider -eq 'AgentRouter') {
-        $apiKey = Unprotect-RFMachineApiKey ([string]$Settings.ApiKeyProtected)
-        if (-not $apiKey) { throw 'Для Agent Router не указан API-ключ.' }
         if (-not $Settings.Model) { throw 'Для Agent Router не указана модель.' }
-        Set-RFAutoTranslationAiSettings $document $root $Settings $apiKey
+        $bridge = Join-Path $ProjectRoot 'bin\AgentRouterBridge.exe'
+        if (-not (Test-Path -LiteralPath $bridge)) { throw 'Не найден bin\AgentRouterBridge.exe.' }
+        Set-RFAutoTranslationCliSettings $document $root $Settings $bridge
     }
     $backupPath = ''
     if (Test-Path -LiteralPath $settingsPath) {
@@ -223,5 +300,5 @@ function Enable-RFMachineTranslation {
 
 Export-ModuleMember -Function @(
     'Get-RFMachineSettings', 'Save-RFMachineSettings', 'Protect-RFMachineApiKey',
-    'Unprotect-RFMachineApiKey', 'Enable-RFMachineTranslation'
+    'Unprotect-RFMachineApiKey', 'Test-RFMachineTranslationProvider', 'Enable-RFMachineTranslation'
 )

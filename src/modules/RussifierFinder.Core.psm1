@@ -479,6 +479,13 @@ function ConvertFrom-RFWorkshopSearchHtml {
 function Get-RFNormalizedText {
     param([AllowNull()][string]$Text)
     $value = ([string]$Text).ToLowerInvariant()
+    # Workshop titles often wrap author abbreviations and supported-version
+    # ranges around the real mod name, for example
+    # "[ARY] Automatic Stump Chopping [1.5 to 1.7]". These labels are not
+    # part of the identity and otherwise make an exact translation-title match
+    # look only partially related.
+    $value = [regex]::Replace($value, '^(?:\s*\[[a-z0-9]{2,8}\]\s*)+', ' ')
+    $value = [regex]::Replace($value, '(?i)\[\s*v?\d+(?:\.\d+)+(?:\s*(?:to|[-–—,/&])\s*v?\d+(?:\.\d+)+)*\s*\]', ' ')
     $value = [regex]::Replace($value, $script:RussianPattern, ' ')
     $value = [regex]::Replace($value, '(?i)language\s*pack|translation|locali[sz]ation', ' ')
     $value = [regex]::Replace($value, '[^a-zа-яё0-9]+', ' ')
